@@ -1,0 +1,98 @@
+name: Build TransocksNoAd
+
+on:
+  workflow_dispatch:
+  push:
+    paths-ignore:
+      - "README.md"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check glob matcher
+        run: |
+          clang -Wall -Wextra -Werror -std=c11 -I Engine Tests/test_glob.c Engine/TNAGlob.c -o /tmp/transocksnoad-glob
+          /tmp/transocksnoad-glob
+      - name: Check ad hook patterns
+        run: |
+          clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter -I Engine -framework Foundation \
+            Tests/test_pattern.m Engine/TNAPattern.m Engine/TNAGlob.c -o /tmp/transocksnoad-pattern
+          /tmp/transocksnoad-pattern Tests/corpus_classes.txt
+      - name: Review rule coverage
+        run: python3 Tests/check_rules.py < Tests/corpus_classes.txt
+      - name: Install signing tools
+        run: brew install ldid xz
+      - name: Install pinned RootHide Theos and iOS 15.6 SDK
+        run: |
+          export THEOS="$RUNNER_TEMP/theos"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          git clone https://github.com/roothide/theos.git "$THEOS"
+          git -C "$THEOS" checkout 88506b2c22e9e07dd4ed055f23c9e398a117a2c7
+          git -C "$THEOS" submodule update --init --recursive
+          git clone --filter=blob:none --no-checkout https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          git -C "$RUNNER_TEMP/sdks" sparse-checkout set iPhoneOS15.6.sdk
+          git -C "$RUNNER_TEMP/sdks" checkout 0222fd5413cf4b9af096f37b4621afa2688572f7
+          cp -R "$RUNNER_TEMP/sdks/iPhoneOS15.6.sdk" "$THEOS/sdks/"
+      - name: Build package
+        run: make clean package FINALPACKAGE=1
+      - name: Verify standalone dylib and package
+        run: |
+          python3 - <<'PY'
+          import gzip
+          import lzma
+          import pathlib
+          import re
+          import struct
+          import subprocess
+
+          def read_control(deb_path):
+              data = deb_path.read_bytes()
+              assert data[:8] == b'!<arch>\n', 'expected an ar archive'
+              pos, tail = 8, len(data) - 60
+              while pos <= tail:
+                  name = data[pos:pos + 16].decode().rstrip()
+                  size = int(data[pos + 48:pos + 58].decode())
+                  if name.startswith('control'):
+                      body = data[pos + 60:pos + 60 + size]
+                      raw = gzip.decompress(body) if body[:2] == b'\x1f\x8b' else lzma.decompress(body)
+                      return raw.decode(errors='replace')
+                  pos += 60 + size + (size & 1)
+              raise AssertionError('no control member in deb')
+
+          dylib = next(pathlib.Path('.theos/obj').rglob('TransocksNoAd.dylib'))
+          magic, cpu, subtype = struct.unpack_from('<III', dylib.read_bytes())
+          assert magic == 0xfeedfacf and cpu == 0x100000c, 'expected thin ARM64 Mach-O'
+          assert subtype == 0x0, f'expected plain arm64 to match the host app, got {subtype:#x}'
+          # otool 前两行分别是文件路径与自身 install name（含 MobileSubstrate 目录），只比对依赖的 basename
+          out = subprocess.check_output(['otool', '-L', str(dylib)], text=True)
+          names = [line.strip().split(' (')[0].rsplit('/', 1)[-1] for line in out.splitlines() if line.startswith('\t')]
+          names = [n for n in names if n != dylib.name]
+          assert not any('substrate' in n.lower() or 'ellekit' in n.lower() for n in names), names
+          print(names)
+          packages = list(pathlib.Path('packages').glob('*.deb'))
+          assert len(packages) == 1, f'expected one deb, got {len(packages)}'
+          control = read_control(packages[0])
+          # iphoneos-arm64e 是 roothide 的包架构标签（theos 在 vendor/mod/roothide/package/deb.mk 里强制），
+          # 与 dylib 的实际 ABI 无关：宿主 App 是纯 arm64，所以二进制必须是 plain arm64。
+          arch = re.search(r'^Architecture: (.+)$', control, re.M).group(1).strip()
+          assert arch == 'iphoneos-arm64e', f'expected roothide package label, got {arch}'
+          assert re.search(r'^Depends: .*mobilesubstrate', control, re.M), control
+          assert packages[0].name.endswith('_iphoneos-arm64e.deb'), packages[0].name
+          print('built', packages[0], dylib)
+          PY
+          find .theos/_ -type f | grep -E 'TransocksNoAd\.dylib|TransocksNoAd\.plist'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TransocksNoAd-roothide-deb
+          path: packages/*.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TransocksNoAd-injectable-dylib
+          path: .theos/_/**/TransocksNoAd.dylib
+          if-no-files-found: error

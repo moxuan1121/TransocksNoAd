@@ -1,0 +1,9 @@
+Package: com.moxuan.transocksnoad
+Name: TransocksNoAd
+Version: 0.0.1
+Architecture: iphoneos-arm64e
+Description: 屏蔽穿梭（Transocks-iOS）iOS 端广告展示：开屏、插屏、Banner、信息流原生位。
+Maintainer: moxuan
+Author: moxuan
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 15.0)
