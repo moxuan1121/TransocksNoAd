@@ -164,9 +164,9 @@ static void probeExact(id target, unsigned int n, unsigned int tag) {
     for (unsigned int i = 0; i < n; i++)
         if (gSlots[2 + i] == (__bridge void *)gE[i]) matched++;
     printf("  n=%u tag=%u enc=%s self=%d cmd=%d args=%u/%u\n", n, tag, enc,
-           gSlots[0] == (__bridge void *)gWantSelf, gSlots[1] == (void *)sel, matched, n);
+           gSlots[0] == gWantSelf, gSlots[1] == (void *)sel, matched, n);
     describe();
-    if (matched != n || gSlots[0] != (__bridge void *)gWantSelf || gSlots[1] != (void *)sel) failures++;
+    if (matched != n || gSlots[0] != gWantSelf || gSlots[1] != (void *)sel) failures++;
 }
 
 int main(void) {
