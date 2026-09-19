@@ -297,36 +297,49 @@ static void TNADefuse(id target) {
     else dispatch_async(dispatch_get_main_queue(), work);
 }
 
-static IMP TNADefuseIMP(IMP original, char returnType) {
-    void (^voidBlock)(id, SEL, void *, void *, void *) = ^(id self, SEL _cmd, void *a0, void *a1, void *a2) {
-        ((void (*)(id, SEL, void *, void *, void *))original)(self, _cmd, a0, a1, a2);
-        TNADefuse(self);
-    };
-    id (^objectBlock)(id, SEL, void *, void *, void *) = ^(id self, SEL _cmd, void *a0, void *a1, void *a2) {
-        id result = ((id (*)(id, SEL, void *, void *, void *))original)(self, _cmd, a0, a1, a2);
-        TNADefuse(self);
-        return result;
-    };
-    float (^floatBlock)(id, SEL, void *, void *, void *) = ^(id self, SEL _cmd, void *a0, void *a1, void *a2) {
-        float result = ((float (*)(id, SEL, void *, void *, void *))original)(self, _cmd, a0, a1, a2);
-        TNADefuse(self);
-        return result;
-    };
-    double (^doubleBlock)(id, SEL, void *, void *, void *) = ^(id self, SEL _cmd, void *a0, void *a1, void *a2) {
-        double result = ((double (*)(id, SEL, void *, void *, void *))original)(self, _cmd, a0, a1, a2);
-        TNADefuse(self);
-        return result;
-    };
-    NSInteger (^scalarBlock)(id, SEL, void *, void *, void *) = ^(id self, SEL _cmd, void *a0, void *a1, void *a2) {
-        NSInteger result = ((NSInteger(*)(id, SEL, void *, void *, void *))original)(self, _cmd, a0, a1, a2);
-        TNADefuse(self);
-        return result;
-    };
-    id block = returnType == '@' || returnType == '#' ? (id)objectBlock
-             : returnType == 'f' ? (id)floatBlock
-             : returnType == 'd' ? (id)doubleBlock
-             : returnType == 'v' ? (id)voidBlock
-                                 : (id)scalarBlock;
+// 转发垫片也按实参个数分族，而且只到 1 个为止：块声明几位，原实现就从哪几位取值。声明多了会把
+// 脏寄存器转发给原实现（willMoveToWindow: 收到一个假 window 就是崩溃），声明少了才会原样丢弃。
+// 槽位一律用 void *：垫片不关心它们是什么类型，ARC 也就不会去 retain 一个指针槽位。
+#define TNADefuse0(RET)                                             \
+    (^RET(id self, SEL _cmd) {                                      \
+        RET result = ((RET (*)(id, SEL))original)(self, _cmd);      \
+        TNADefuse(self);                                            \
+        return result;                                              \
+    })
+#define TNADefuse1(RET)                                                         \
+    (^RET(id self, SEL _cmd, void *a0) {                                        \
+        RET result = ((RET (*)(id, SEL, void *))original)(self, _cmd, a0);      \
+        TNADefuse(self);                                                        \
+        return result;                                                          \
+    })
+
+static IMP TNADefuseIMP(IMP original, char returnType, unsigned int realArgs) {
+    if (realArgs > 1) return NULL;
+    BOOL one = realArgs == 1;
+    id block = nil;
+    if (returnType == 'v') {
+        if (one) {
+            void (^b)(id, SEL, void *) = ^void(id self, SEL _cmd, void *a0) {
+                ((void (*)(id, SEL, void *))original)(self, _cmd, a0);
+                TNADefuse(self);
+            };
+            block = (id)b;
+        } else {
+            void (^b)(id, SEL) = ^void(id self, SEL _cmd) {
+                ((void (*)(id, SEL))original)(self, _cmd);
+                TNADefuse(self);
+            };
+            block = (id)b;
+        }
+    } else if (returnType == '@' || returnType == '#' || returnType == '*' || returnType == '^') {
+        block = one ? (id)TNADefuse1(id) : (id)TNADefuse0(id);
+    } else if (returnType == 'f') {
+        block = one ? (id)TNADefuse1(float) : (id)TNADefuse0(float);
+    } else if (returnType == 'd') {
+        block = one ? (id)TNADefuse1(double) : (id)TNADefuse0(double);
+    } else {
+        block = one ? (id)TNADefuse1(NSInteger) : (id)TNADefuse0(NSInteger);
+    }
     TNAKeep(block);
     return imp_implementationWithBlock(block);
 }
@@ -344,10 +357,11 @@ static void TNAInstallIn(Class cls) {
             char returnType = 'v';
             const char *encoding = method_getTypeEncoding(method);
             if (!TNAReturnKind(encoding, &returnType)) continue;
-            // 转发垫片只带 3 个指针参数，self/_cmd 之外更多参数的方法一律不动。
-            if (method_getNumberOfArguments(method) > 5) continue;
+            // 转发垫片最多带 1 个实参；更宽的方法一律不动。
+            unsigned int arguments = method_getNumberOfArguments(method);
+            if (arguments > 3) continue;
             IMP original = method_getImplementation(method);
-            IMP replacement = TNADefuseIMP(original, returnType);
+            IMP replacement = TNADefuseIMP(original, returnType, arguments - 2);
             if (!replacement || original == replacement) continue;
             method_setImplementation(method, replacement);
             TNAHookedCount++;
@@ -620,11 +634,6 @@ static const char *TNAGateNilSites[][2] = {
     { "ATAdManager", "offerWithPlacementID:error:refresh:" },
 };
 
-static void *TNAArg(void **slots, unsigned int index) {
-    if (index < 2 || index > 7) return NULL;
-    return slots[index];  // slots[0]=self、slots[1]=_cmd
-}
-
 static void TNAFireTerminal(id delegate, const TNASuppressSite *site, id adObject, NSString *placementID) {
     if (!delegate || !site->terminalSel) return;
     SEL terminal = sel_getUid(site->terminalSel);
@@ -656,41 +665,90 @@ static void TNAFireTerminal(id delegate, const TNASuppressSite *site, id adObjec
     }
 }
 
-// 一个块形打天下：self/_cmd 之后声明 6 个指针参数，够覆盖到第 7 个实参（TopOn 的
-// showSplashWithPlacementID:config:window:inViewController:extra:delegate:）。
-// imp_implementationWithBlock 的垫片只动 x0/x17，多余的 x 寄存器原样带进块里，所以多声明无害。
-static IMP TNASuppressIMP(const TNASuppressSite *site, SEL delegateGetter) {
-    void (^block)(id, SEL, void *, void *, void *, void *, void *, void *) =
-        ^(id self, SEL _cmd, void *a0, void *a1, void *a2, void *a3, void *a4, void *a5) {
-            void *slots[8] = { (__bridge void *)self, (void *)_cmd, a0, a1, a2, a3, a4, a5 };
-            id delegate = nil;
-            if (delegateGetter) {
-                delegate = ((id (*)(id, SEL))objc_msgSend)(self, delegateGetter);
-            } else {
-                delegate = (__bridge id)TNAArg(slots, site->delegateArg);
-            }
-            NSString *placementID = nil;
-            id first = (__bridge id)slots[2];
-            if ([first isKindOfClass:NSString.class]) placementID = (NSString *)first;
-            if (!placementID) placementID = @"";
-            atomic_fetch_add_explicit(&TNAActionCount, 1, memory_order_relaxed);
-            TNALog(@"suppress -[%@ %@] delegate=%@", NSStringFromClass(object_getClass(self)), @(site->sel),
-                   delegate ? NSStringFromClass([delegate class]) : @"-");
-            TNAFireTerminal(delegate, site, self, placementID);
-        };
+static void TNASuppressRun(const TNASuppressSite *site, SEL delegateGetter, id self, const id *args,
+                           unsigned int count) {
+    id delegate = nil;
+    if (delegateGetter) {
+        delegate = ((id (*)(id, SEL))objc_msgSend)(self, delegateGetter);
+    } else if (site->delegateArg >= 2 && site->delegateArg - 2 < count) {
+        delegate = args[site->delegateArg - 2];
+    }
+    id first = count ? args[0] : nil;
+    // placementID 一律是第一个实参；不是字符串就说明 SDK 换了签名，回空串即可（终态回调宁少勿崩）。
+    NSString *placementID = [first isKindOfClass:NSString.class] ? (NSString *)first : @"";
+    atomic_fetch_add_explicit(&TNAActionCount, 1, memory_order_relaxed);
+    TNALog(@"suppress -[%@ %@] delegate=%@", NSStringFromClass(object_getClass(self)), @(site->sel),
+           delegate ? NSStringFromClass([delegate class]) : @"-");
+    TNAFireTerminal(delegate, site, self, placementID);
+}
+
+// 块的实参个数必须和目标方法一字不差。imp_implementationWithBlock 的闭包按「块自己的签名」搬寄存器，
+// 多声明的那几位拿到的是脏寄存器，一旦当成对象用（bridge 成 id 就 objc_retain）直接 SIGSEGV——
+// 上一版一个宽块通吃所有站点，开屏的 loadADWithPlacementID:extra:delegate: 就是这么把 App 打崩的。
+// 反过来少声明是安全的（多出来的寄存器没人读），所以按实参个数 0..6 分族，逐族各写一块。
+// 站点表已保证 self/_cmd 之外的实参全是对象（TNAArgsAllPortable），这些槽位才敢声明成 id。
+static IMP TNASuppressIMP(const TNASuppressSite *site, SEL delegateGetter, unsigned int realArgs) {
+    id block = nil;
+    switch (realArgs) {
+        case 0:
+            block = (id) ^void(id self, SEL _cmd) {
+                TNASuppressRun(site, delegateGetter, self, NULL, 0);
+            };
+            break;
+        case 1:
+            block = (id) ^void(id self, SEL _cmd, id a0) {
+                id args[] = { a0 };
+                TNASuppressRun(site, delegateGetter, self, args, 1);
+            };
+            break;
+        case 2:
+            block = (id) ^void(id self, SEL _cmd, id a0, id a1) {
+                id args[] = { a0, a1 };
+                TNASuppressRun(site, delegateGetter, self, args, 2);
+            };
+            break;
+        case 3:
+            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2) {
+                id args[] = { a0, a1, a2 };
+                TNASuppressRun(site, delegateGetter, self, args, 3);
+            };
+            break;
+        case 4:
+            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2, id a3) {
+                id args[] = { a0, a1, a2, a3 };
+                TNASuppressRun(site, delegateGetter, self, args, 4);
+            };
+            break;
+        case 5:
+            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2, id a3, id a4) {
+                id args[] = { a0, a1, a2, a3, a4 };
+                TNASuppressRun(site, delegateGetter, self, args, 5);
+            };
+            break;
+        case 6:
+            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2, id a3, id a4, id a5) {
+                id args[] = { a0, a1, a2, a3, a4, a5 };
+                TNASuppressRun(site, delegateGetter, self, args, 6);
+            };
+            break;
+        default:
+            return NULL;
+    }
     TNAKeep(block);
     return imp_implementationWithBlock(block);
 }
 
+// 网关块一个实参都不声明：它只伪造返回值，读到的寄存器一个也不用。声明得比目标方法少是安全的，
+// 多出来的实参没人碰；反过来多声明就会把脏寄存器当参数用（见 TNASuppressIMP 的注释）。
 static IMP TNAGateNoIMP(void) {
     static IMP cached;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        BOOL (^block)(id, SEL, void *, void *, void *, void *, void *, void *) =
-            ^(id self, SEL _cmd, void *a0, void *a1, void *a2, void *a3, void *a4, void *a5) {
-                (void)self; (void)_cmd; (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-                return NO;
-            };
+        BOOL (^block)(id, SEL) = ^BOOL(id self, SEL _cmd) {
+            (void)self; (void)_cmd;
+            atomic_fetch_add_explicit(&TNAActionCount, 1, memory_order_relaxed);
+            return NO;
+        };
         TNAKeep(block);
         cached = imp_implementationWithBlock(block);
     });
@@ -701,11 +759,11 @@ static IMP TNAGateNilIMP(void) {
     static IMP cached;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        void * (^block)(id, SEL, void *, void *, void *, void *, void *, void *) =
-            ^(id self, SEL _cmd, void *a0, void *a1, void *a2, void *a3, void *a4, void *a5) {
-                (void)self; (void)_cmd; (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-                return NULL;
-            };
+        void *(^block)(id, SEL) = ^void *(id self, SEL _cmd) {
+            (void)self; (void)_cmd;
+            atomic_fetch_add_explicit(&TNAActionCount, 1, memory_order_relaxed);
+            return NULL;
+        };
         TNAKeep((id)block);
         cached = imp_implementationWithBlock(block);
     });
@@ -758,7 +816,8 @@ static void TNAInstallSite(const TNASuppressSite *site) {
                arguments, @(site->cls), @(site->sel));
         return;
     }
-    IMP replacement = TNASuppressIMP(site, site->delegateGetter ? sel_getUid(site->delegateGetter) : NULL);
+    IMP replacement = TNASuppressIMP(site, site->delegateGetter ? sel_getUid(site->delegateGetter) : NULL,
+                                     arguments - 2);
     IMP original = method_getImplementation(method);
     if (!replacement || original == replacement) return;
     method_setImplementation(method, replacement);
