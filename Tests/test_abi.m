@@ -8,6 +8,7 @@
 //
 // 只给 CI 的主机步骤用（clang -framework Foundation），不参与 iOS 打包。
 #import <Foundation/Foundation.h>
+#import <objc/message.h>
 #import <objc/runtime.h>
 
 static void *gSlots[8];
