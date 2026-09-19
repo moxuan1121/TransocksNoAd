@@ -26,6 +26,9 @@ static NSTimeInterval TNALaunchUptime = 0;
 // 挂上格式检查：这些日志是下次真机迭代唯一的依据，写错一个占位符就是白跑一轮。
 static void TNALog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 
+// 只数写了多少条，不数数组长度：数组到 2500 条就截断，长度看不出这一轮有没有新内容。
+static _Atomic NSUInteger TNALogSeq = 0;
+
 static void TNALog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
@@ -34,6 +37,7 @@ static void TNALog(NSString *format, ...) {
     NSString *line = [NSString stringWithFormat:@"+%7.3f %@",
                       NSProcessInfo.processInfo.systemUptime - TNALaunchUptime, message];
     os_log(TNALogger(), "%{public}@", line);
+    atomic_fetch_add_explicit(&TNALogSeq, 1, memory_order_relaxed);
     @synchronized(TNAJournal()) {
         [TNAJournal() addObject:line];
         if (TNAJournal().count > 2500) [TNAJournal() removeObjectsInRange:NSMakeRange(0, TNAJournal().count - 2500)];
@@ -46,7 +50,13 @@ static void TNAFlushLog(void) {
     @synchronized(TNAJournal()) {
         snapshot = [TNAJournal() copy];
     }
-    [[snapshot componentsJoinedByString:@"\n"] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    NSString *text = [snapshot componentsJoinedByString:@"\n"];
+    (void)[text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    // 沙盒里的日志取不出来就等于没有：这份同时写到 /var/mobile/Media，Filza 或爱思直接能拿到。
+    for (NSString *shared in @[ @"/var/mobile/Media/TransocksNoAd.log",
+                                @"/var/mobile/Media/Documents/TransocksNoAd.log" ]) {
+        (void)[text writeToFile:shared atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    }
 }
 
 static NSMutableArray<id> *TNAKeepAlive(void) {
@@ -469,6 +479,7 @@ static void TNAScanOverlays(void) {
     static BOOL baselined = NO;
     BOOL report = baselined;
     baselined = YES;
+    NSUInteger before = atomic_load_explicit(&TNALogSeq, memory_order_relaxed);
     NSMutableArray<UIView *> *queue = [NSMutableArray array];
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
@@ -491,18 +502,17 @@ static void TNAScanOverlays(void) {
         NSString *text = TNAViewText(view);
         TNALog(@"overlay %@ frame=%@ text=%@", className, NSStringFromCGRect(view.frame), text ?: @"-");
     }
-    if (report) TNAFlushLog();
+    // 每秒往磁盘重写整份日志，等于给主线程加了一次同步 IO —— 卡在开屏时这就是自己造的噪音。
+    // 这一轮没记下新视图就别写盘。
+    if (report && atomic_load_explicit(&TNALogSeq, memory_order_relaxed) != before) TNAFlushLog();
 }
 
 #pragma mark - explicit sites
 
 typedef NS_ENUM(NSUInteger, TNATerminal) {
     TNATerminalNone = 0,   // 只吞掉调用，不补回调（原生广告回填没有等待方，吞掉即可）
-    TNATerminalAd1,        // [delegate sel:self]
     TNATerminalSelfErr2,   // [delegate sel:self error:e]
     TNATerminalPidExtra2,  // [delegate sel:pid extra:@{}]
-    TNATerminalPidErr2,    // [delegate sel:pid error:e]
-    TNATerminalPidErr3,    // [delegate sel:pid error:e extra:@{}]
 };
 
 typedef struct {
@@ -514,30 +524,17 @@ typedef struct {
     TNATerminal terminal;
 } TNASuppressSite;
 
-// 屏蔽的是「这次请求/这次展示」，但终态回调一定补上——穿梭的开屏和插屏都是等回调往下走的流程，
-// 把 load*/show* 直接挂成空实现就是把 App 卡死在启动页（上一版在向日葵上踩过的坑）。
+// 只吞「把广告画到屏幕上」这一步，而且补的必须是 SDK 自己那条流程真会发的终态回调。
+//
+// 请求/加载一类一律不吞（ATAdManager loadADWithPlacementID:…、GDTSplashAd loadAd*、
+// GADAdLoader loadRequest:、ATInterstitialAutoAdManager showAutoLoad…）：反汇编 3.4.0，App 侧这些
+// 回调的接收方（ToponAd.SplashAdaper、AdsManager、GAD*AdAdapter）逐条都只是往埋点上报里丢一个事件，
+// 真正往下推进启动流程的是 SDK 内部那条加载链。把请求挂成空实现，加载就永远不「结束」，App 吊在
+// 开屏页进不去（0.0.1 修掉闪退之后卡在开屏，就是这个原因）。开屏改由两道不牵扯回调的机制处理：
+// 问询回 NO（splashReady…）、取广告对象回 nil（getSplashValidAds…），再加按类名的遮挡与自动跳过。
+// 同理 GADAppOpenAd 的 present 也不吞——它就是启动/回前台时盖上来那一层，交给遮挡处理。
 static const TNASuppressSite TNASuppressSites[] = {
-    // TopOn/AnyThink：第一个实参是 placementID，delegate 在不同版本里的参数位置不同，逐个标出。
-    { "ATAdManager", "loadADWithPlacementID:extra:delegate:", NULL, 4,
-      "didFailToLoadADWithPlacementID:error:", TNATerminalPidErr2 },
-    { "ATAdManager", "loadADWithPlacementID:extra:delegate:containerView:", NULL, 4,
-      "didFailToLoadADWithPlacementID:error:", TNATerminalPidErr2 },
-    { "ATAdManager", "loadADWithPlacementID:extra:delegate:mediaVideoContainerView:viewController:", NULL, 4,
-      "didFailToLoadADWithPlacementID:error:", TNATerminalPidErr2 },
-    { "ATAdManager", "showSplashWithPlacementID:scene:window:delegate:", NULL, 5,
-      "splashDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATAdManager", "showSplashWithPlacementID:scene:window:extra:delegate:", NULL, 6,
-      "splashDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATAdManager", "showSplashWithPlacementID:scene:window:inViewController:delegate:", NULL, 6,
-      "splashDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATAdManager", "showSplashWithPlacementID:scene:window:inViewController:extra:delegate:", NULL, 7,
-      "splashDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATAdManager", "showSplashWithPlacementID:config:window:inViewController:extra:delegate:", NULL, 7,
-      "splashDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATAdManager", "showNormalSplashWithPlacementID:window:inViewController:delegate:splash:extra:", NULL, 5,
-      "splashDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATAdManager", "showNativeSplashWithPlacementID:splash:window:inViewController:delegate:extra:", NULL, 6,
-      "splashDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
+    // TopOn/AnyThink 插屏：第一个实参是 placementID，delegate 的位置按签名逐个标出。
     { "ATAdManager", "showInterstitialWithPlacementID:inViewController:delegate:", NULL, 4,
       "interstitialDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
     { "ATAdManager", "showInterstitialWithPlacementID:scene:inViewController:delegate:", NULL, 5,
@@ -546,39 +543,13 @@ static const TNASuppressSite TNASuppressSites[] = {
       NULL, 5, "interstitialDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
     { "ATAdManager", "showInterstitialWithPlacementID:scene:inViewController:delegate:nativeMixViewBlock:",
       NULL, 5, "interstitialDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATInterstitialAutoAdManager", "showAutoLoadInterstitialWithPlacementID:inViewController:delegate:", NULL, 4,
-      "interstitialDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    { "ATInterstitialAutoAdManager", "showAutoLoadInterstitialWithPlacementID:scene:inViewController:delegate:",
-      NULL, 5, "interstitialDidCloseForPlacementID:extra:", TNATerminalPidExtra2 },
-    // 优量汇：delegate 是广告对象自己的属性，取 [self delegate]。
-    { "GDTSplashAd", "loadAd", "delegate", 0, "splashAdClosed:", TNATerminalAd1 },
-    { "GDTSplashAd", "loadFullScreenAd", "delegate", 0, "splashAdClosed:", TNATerminalAd1 },
-    { "GDTSplashAd", "loadAdAndShowInWindow:", "delegate", 0, "splashAdClosed:", TNATerminalAd1 },
-    { "GDTSplashAd", "loadAdAndShowInWindow:withBottomView:", "delegate", 0, "splashAdClosed:", TNATerminalAd1 },
-    { "GDTSplashAd", "loadAdAndShowInWindow:withBottomView:skipView:", "delegate", 0, "splashAdClosed:",
-      TNATerminalAd1 },
-    { "GDTSplashAd", "loadAdAndShowFullScreenInWindow:withLogoImage:skipView:", "delegate", 0, "splashAdClosed:",
-      TNATerminalAd1 },
-    { "GDTSplashAd", "showAdInWindow:withBottomView:skipView:", "delegate", 0, "splashAdClosed:", TNATerminalAd1 },
-    { "GDTSplashAd", "showFullScreenAdInWindow:withLogoImage:skipView:", "delegate", 0, "splashAdClosed:",
-      TNATerminalAd1 },
-    { "GDTSplashAd", "showAdInWindow:adProviderView:skipView:", "delegate", 0, "splashAdClosed:", TNATerminalAd1 },
-    { "GDTUnifiedInterstitialAd", "loadAd", "delegate", 0, "unifiedInterstitialFailToLoadAd:error:",
-      TNATerminalSelfErr2 },
-    { "GDTUnifiedInterstitialAd", "loadFullScreenAd", "delegate", 0, "unifiedInterstitialFailToLoadAd:error:",
-      TNATerminalSelfErr2 },
+    // 优量汇插屏：delegate 是广告对象自己的属性，失败回调是 SDK 协议里本就有的那条。
     { "GDTUnifiedInterstitialAd", "presentAdFromRootViewController:", "delegate", 0,
       "unifiedInterstitialFailToPresent:error:", TNATerminalSelfErr2 },
     { "GDTUnifiedInterstitialAd", "presentFullScreenAdFromRootViewController:", "delegate", 0,
       "unifiedInterstitialFailToPresent:error:", TNATerminalSelfErr2 },
-    // AdMob：全屏内容的 delegate 是对象自己的属性，失败回调是 SDK 协议里本就有的那条。
     { "GADInterstitialAd", "presentFromRootViewController:", "fullScreenContentDelegate", 0,
       "ad:didFailToPresentFullScreenContentWithError:", TNATerminalSelfErr2 },
-    { "GADAppOpenAd", "presentFromRootViewController:", "fullScreenContentDelegate", 0,
-      "ad:didFailToPresentFullScreenContentWithError:", TNATerminalSelfErr2 },
-    { "GADAdLoader", "loadRequest:", "delegate", 0, "adLoader:didFailToReceiveAdWithError:", TNATerminalSelfErr2 },
-    { "GADAdLoader", "loadRequestWithTarget:", "delegate", 0, "adLoader:didFailToReceiveAdWithError:",
-      TNATerminalSelfErr2 },
     // 原生广告位没有等待方，吞掉回填即可（App 自己的 AdMob 原生转发类）。
     { "_TtC13Transocks_iOS18GADNativeAdAdapter", "adLoader:didReceiveNativeAd:", NULL, 0, NULL,
       TNATerminalNone },
@@ -586,6 +557,11 @@ static const TNASuppressSite TNASuppressSites[] = {
 
 // 「有没有广告」的问询一律回 NO：App 侧的排期逻辑读到 NO 就自己走无广告分支，
 // 比等展示出来再摘视图干净得多，也不牵扯任何回调。
+//
+// 但只放「App 先问、问到就自己走无广告分支」这一类。开屏广告对象的状态位（GDTSplashAd isAdValid）
+// 和取素材的入口（getSplashValidAdsForPlacementID:）不进来：它们同样在开屏那条链上，调用方却可能是
+// SDK 自己 —— 拿到位就少走一步、又不补任何回调，开屏停在等不到的那一步上（0.0.1 卡在开屏要排掉的可能项）。
+// 插屏和 banner 不在启动链上，状态位照回；开屏一律让流程跑完，由类名遮挡负责不显示。
 static const char *TNAGateNoSites[][2] = {
     { "ATAdManager", "splashReadyForPlacementID:" },
     { "ATAdManager", "splashReadyForPlacementID:sendTK:" },
@@ -608,14 +584,13 @@ static const char *TNAGateNoSites[][2] = {
     { "ATAdManager", "unionReadyForPlacementID:" },
     { "ATAdManager", "unionReadyForPlacementID:sendTK:" },
     { "ATAdManager", "unionReadyForPlacementID:showConfig:caller:ad:extraInfo:sendTK:" },
-    { "GDTSplashAd", "isAdValid" },
     { "GDTUnifiedInterstitialAd", "isAdValid" },
     { "GDTUnifiedBannerView", "isAdValid" },
 };
 
 // 取广告对象的入口一律回 nil：拿不到 offer/banner 视图，信息流和 banner 位就一直是空的。
+// 同样不含开屏那道（getSplashValidAdsForPlacementID:），理由见上面 NO 表。
 static const char *TNAGateNilSites[][2] = {
-    { "ATAdManager", "getSplashValidAdsForPlacementID:" },
     { "ATAdManager", "getInterstitialValidAdsForPlacementID:" },
     { "ATAdManager", "getNativeValidAdsForPlacementID:" },
     { "ATAdManager", "getBannerValidAdsForPlacementID:" },
@@ -647,20 +622,11 @@ static void TNAFireTerminal(id delegate, const TNASuppressSite *site, id adObjec
     // extra 一律给空字典而不是 nil：Swift 会把 SDK 头文件里没标 nullability 的 NSDictionary 导成
     // 非可选字典，传 nil 过去在桥接处直接崩。placementID 同理兜一个空串。
     switch (site->terminal) {
-        case TNATerminalAd1:
-            ((void (*)(id, SEL, id))objc_msgSend)(delegate, terminal, adObject);
-            break;
         case TNATerminalSelfErr2:
             ((void (*)(id, SEL, id, id))objc_msgSend)(delegate, terminal, adObject, error);
             break;
         case TNATerminalPidExtra2:
             ((void (*)(id, SEL, id, id))objc_msgSend)(delegate, terminal, placementID, @{});
-            break;
-        case TNATerminalPidErr2:
-            ((void (*)(id, SEL, id, id))objc_msgSend)(delegate, terminal, placementID, error);
-            break;
-        case TNATerminalPidErr3:
-            ((void (*)(id, SEL, id, id, id))objc_msgSend)(delegate, terminal, placementID, error, @{});
             break;
         default:
             break;
@@ -949,10 +915,24 @@ __attribute__((constructor)) static void TransocksNoAdEntry(void) {
         TNALaunchUptime = NSProcessInfo.processInfo.systemUptime;
         TNALog(@"TransocksNoAd attached to %@ / %@", NSProcessInfo.processInfo.processName,
                NSBundle.mainBundle.bundleIdentifier);
+        // 开关文件：真机上出问题又取不到日志时，建一个空的 /var/mobile/Media/TransocksNoAd.off
+        // 再启动，就能把这一版整个关掉，直接分清是 App 自己卡住还是被钩子卡住。
+        if ([NSFileManager.defaultManager fileExistsAtPath:@"/var/mobile/Media/TransocksNoAd.off"]) {
+            TNALog(@"disabled by /var/mobile/Media/TransocksNoAd.off");
+            TNAFlushLog();
+            return;
+        }
         TNAInstallAll(@"launch", YES);
         TNAInstallExplicitSites(@"launch");
         // 主线程每秒扫一遍界面层，把新出现的 App 自有视图记进日志，先认出来才能屏蔽。
+        // 扫过启动窗口就收工：这是诊断用的，一直挂在主线程上只会拖慢整个 App。
         [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+            if (NSProcessInfo.processInfo.systemUptime - TNALaunchUptime > TNAStartupWindow) {
+                [timer invalidate];
+                TNALog(@"overlay probe stopped");
+                TNAFlushLog();
+                return;
+            }
             TNAScanOverlays();
         }];
         // 广告视图类大多要等第一次请求广告时才注册，所以要反复补扫；热启动回前台同理。

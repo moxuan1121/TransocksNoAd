@@ -24,8 +24,8 @@ typedef struct {
     "*BootAd*|*ToponAd*|*ToponManager*|*GAD*Adapter*|*AnyThink*"
 
 // 只挂「展示」这一层：原实现照常跑完，SDK 的加载、倒计时、关闭回调都不被截断，
-// 宿主 App 的开屏流程因此不会卡住。加载/请求那层的屏蔽另有显式站点表（TNAHooks.m 的 gate/suppress），
-// 那里才需要替 SDK 补一个终态回调。
+// 宿主 App 的开屏流程因此不会卡住。显式站点表（TNAHooks.m 的 gate/suppress）也一律不碰加载/请求，
+// 只吞中途弹出的插屏展示并补上 SDK 自己的终态回调；开屏靠问询回 NO、取广告回 nil 加这里的遮挡。
 #define TNA_PRESENT_SEL                                                            \
     "viewDidAppear:|viewWillAppear:|viewDidLayoutSubviews|didMoveToWindow|"        \
     "willMoveToWindow:|layoutSubviews|makeKeyAndVisible|show*|present*|render*"
