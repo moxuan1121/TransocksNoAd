@@ -297,36 +297,38 @@ static void TNADefuse(id target) {
     else dispatch_async(dispatch_get_main_queue(), work);
 }
 
-// 转发垫片也按实参个数分族，而且只到 1 个为止：块声明几位，原实现就从哪几位取值。声明多了会把
-// 脏寄存器转发给原实现（willMoveToWindow: 收到一个假 window 就是崩溃），声明少了才会原样丢弃。
-// 槽位一律用 void *：垫片不关心它们是什么类型，ARC 也就不会去 retain 一个指针槽位。
-#define TNADefuse0(RET)                                             \
-    (^RET(id self, SEL _cmd) {                                      \
-        RET result = ((RET (*)(id, SEL))original)(self, _cmd);      \
-        TNADefuse(self);                                            \
-        return result;                                              \
+// 转发垫片也按实参个数分族，而且同样没有 _cmd 这一位（见 TNASuppressIMP 上方的实测结论）：选择子
+// 在装钩子的时候从 Method 里取好、由闭包捕获，再转发给原实现。块声明几位，原实现就从哪几位取值，
+// 多声明一位就会把脏寄存器当成参数转下去（willMoveToWindow: 收到一个假 window 就是崩溃）。
+// 只到 1 个实参为止：更宽的方法形参类型无从判断，一律不动。
+// 槽位一律用 void *：垫片不认识也不需要认识它们是什么类型，ARC 不会去 retain 一个指针槽位。
+#define TNADefuse0(RET)                                         \
+    (^RET(id self) {                                            \
+        RET result = ((RET (*)(id, SEL))original)(self, cmd);   \
+        TNADefuse(self);                                        \
+        return result;                                          \
     })
-#define TNADefuse1(RET)                                                         \
-    (^RET(id self, SEL _cmd, void *a0) {                                        \
-        RET result = ((RET (*)(id, SEL, void *))original)(self, _cmd, a0);      \
-        TNADefuse(self);                                                        \
-        return result;                                                          \
+#define TNADefuse1(RET)                                                     \
+    (^RET(id self, void *a0) {                                              \
+        RET result = ((RET (*)(id, SEL, void *))original)(self, cmd, a0);   \
+        TNADefuse(self);                                                    \
+        return result;                                                      \
     })
 
-static IMP TNADefuseIMP(IMP original, char returnType, unsigned int realArgs) {
+static IMP TNADefuseIMP(IMP original, SEL cmd, char returnType, unsigned int realArgs) {
     if (realArgs > 1) return NULL;
     BOOL one = realArgs == 1;
     id block = nil;
     if (returnType == 'v') {
         if (one) {
-            void (^b)(id, SEL, void *) = ^void(id self, SEL _cmd, void *a0) {
-                ((void (*)(id, SEL, void *))original)(self, _cmd, a0);
+            void (^b)(id, void *) = ^void(id self, void *a0) {
+                ((void (*)(id, SEL, void *))original)(self, cmd, a0);
                 TNADefuse(self);
             };
             block = (id)b;
         } else {
-            void (^b)(id, SEL) = ^void(id self, SEL _cmd) {
-                ((void (*)(id, SEL))original)(self, _cmd);
+            void (^b)(id) = ^void(id self) {
+                ((void (*)(id, SEL))original)(self, cmd);
                 TNADefuse(self);
             };
             block = (id)b;
@@ -361,7 +363,7 @@ static void TNAInstallIn(Class cls) {
             unsigned int arguments = method_getNumberOfArguments(method);
             if (arguments > 3) continue;
             IMP original = method_getImplementation(method);
-            IMP replacement = TNADefuseIMP(original, returnType, arguments - 2);
+            IMP replacement = TNADefuseIMP(original, selector, returnType, arguments - 2);
             if (!replacement || original == replacement) continue;
             method_setImplementation(method, replacement);
             TNAHookedCount++;
@@ -682,51 +684,51 @@ static void TNASuppressRun(const TNASuppressSite *site, SEL delegateGetter, id s
     TNAFireTerminal(delegate, site, self, placementID);
 }
 
-// 块的实参个数必须和目标方法一字不差。imp_implementationWithBlock 的闭包按「块自己的签名」搬寄存器，
-// 多声明的那几位拿到的是脏寄存器，一旦当成对象用（bridge 成 id 就 objc_retain）直接 SIGSEGV——
-// 上一版一个宽块通吃所有站点，开屏的 loadADWithPlacementID:extra:delegate: 就是这么把 App 打崩的。
-// 反过来少声明是安全的（多出来的寄存器没人读），所以按实参个数 0..6 分族，逐族各写一块。
-// 站点表已保证 self/_cmd 之外的实参全是对象（TNAArgsAllPortable），这些槽位才敢声明成 id。
+// 块的实参个数必须和目标方法一字不差，而且**没有 _cmd 这一位**：Tests/test_abi.m 在 arm64 上实测，
+// imp_implementationWithBlock 生成的 IMP 交给块的形参是「self、第 1 个实参、第 2 个实参……」，
+// 选择子根本不下发（0..6 个实参各测一遍，第一个实参永远落在第 2 个形参上）。
+// 上一版按 (self, _cmd, 6 个指针) 声明，于是每个槽位都比表里的下标少一格，
+// loadADWithPlacementID:extra:delegate: 取到的 delegate 其实是越界的脏寄存器，bridge 成 id 就
+// objc_retain 野指针 —— App 一启动就闪退。声明多了会把脏寄存器当对象用，声明少了无所谓，
+// 所以按实参个数 0..6 分族，每族恰好声明那么多 id 形参（站点表已保证这些实参全是对象）。
 static IMP TNASuppressIMP(const TNASuppressSite *site, SEL delegateGetter, unsigned int realArgs) {
     id block = nil;
     switch (realArgs) {
         case 0:
-            block = (id) ^void(id self, SEL _cmd) {
-                TNASuppressRun(site, delegateGetter, self, NULL, 0);
-            };
+            block = (id) ^void(id self) { TNASuppressRun(site, delegateGetter, self, NULL, 0); };
             break;
         case 1:
-            block = (id) ^void(id self, SEL _cmd, id a0) {
+            block = (id) ^void(id self, id a0) {
                 id args[] = { a0 };
                 TNASuppressRun(site, delegateGetter, self, args, 1);
             };
             break;
         case 2:
-            block = (id) ^void(id self, SEL _cmd, id a0, id a1) {
+            block = (id) ^void(id self, id a0, id a1) {
                 id args[] = { a0, a1 };
                 TNASuppressRun(site, delegateGetter, self, args, 2);
             };
             break;
         case 3:
-            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2) {
+            block = (id) ^void(id self, id a0, id a1, id a2) {
                 id args[] = { a0, a1, a2 };
                 TNASuppressRun(site, delegateGetter, self, args, 3);
             };
             break;
         case 4:
-            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2, id a3) {
+            block = (id) ^void(id self, id a0, id a1, id a2, id a3) {
                 id args[] = { a0, a1, a2, a3 };
                 TNASuppressRun(site, delegateGetter, self, args, 4);
             };
             break;
         case 5:
-            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2, id a3, id a4) {
+            block = (id) ^void(id self, id a0, id a1, id a2, id a3, id a4) {
                 id args[] = { a0, a1, a2, a3, a4 };
                 TNASuppressRun(site, delegateGetter, self, args, 5);
             };
             break;
         case 6:
-            block = (id) ^void(id self, SEL _cmd, id a0, id a1, id a2, id a3, id a4, id a5) {
+            block = (id) ^void(id self, id a0, id a1, id a2, id a3, id a4, id a5) {
                 id args[] = { a0, a1, a2, a3, a4, a5 };
                 TNASuppressRun(site, delegateGetter, self, args, 6);
             };
@@ -744,8 +746,8 @@ static IMP TNAGateNoIMP(void) {
     static IMP cached;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        BOOL (^block)(id, SEL) = ^BOOL(id self, SEL _cmd) {
-            (void)self; (void)_cmd;
+        BOOL (^block)(id) = ^BOOL(id self) {
+            (void)self;
             atomic_fetch_add_explicit(&TNAActionCount, 1, memory_order_relaxed);
             return NO;
         };
@@ -759,8 +761,8 @@ static IMP TNAGateNilIMP(void) {
     static IMP cached;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        void *(^block)(id, SEL) = ^void *(id self, SEL _cmd) {
-            (void)self; (void)_cmd;
+        void *(^block)(id) = ^void *(id self) {
+            (void)self;
             atomic_fetch_add_explicit(&TNAActionCount, 1, memory_order_relaxed);
             return NULL;
         };
@@ -873,14 +875,15 @@ static void TNAHideBootAdView(id view) {
 }
 
 static IMP TNAHideOnWindowIMP(IMP original, Class cls) {
-    void (^block)(id, SEL) = ^(id self, SEL _cmd) {
+    SEL cmd = @selector(didMoveToWindow);
+    void (^block)(id) = ^(id self) {
         if (original) {
-            ((void (*)(id, SEL))original)(self, _cmd);
+            ((void (*)(id, SEL))original)(self, cmd);
         } else {
             // 类自己没有实现 didMoveToWindow，补一个就必须把消息转给父类，
             // 否则 UIView 那半截（层级、绘制准备）被我们吞掉了。
             struct objc_super superInfo = { .receiver = self, .super_class = class_getSuperclass(cls) };
-            ((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&superInfo, _cmd);
+            ((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&superInfo, cmd);
         }
         if (!((UIView *)self).isHidden) {
             TNAActionCount++;
