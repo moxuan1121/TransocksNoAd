@@ -25,6 +25,11 @@ jobs:
           /tmp/transocksnoad-pattern Tests/corpus_classes.txt
       - name: Review rule coverage
         run: python3 Tests/check_rules.py < Tests/corpus_classes.txt
+      - name: Check block-as-IMP argument layout (host arm64 runtime)
+        run: |
+          clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter -framework Foundation \
+            Tests/test_abi.m -o /tmp/transocksnoad-abi
+          /tmp/transocksnoad-abi
       - name: Install signing tools
         run: brew install ldid xz
       - name: Install pinned RootHide Theos and iOS 15.6 SDK
