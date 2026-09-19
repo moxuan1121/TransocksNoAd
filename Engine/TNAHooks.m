@@ -701,12 +701,12 @@ static IMP TNAGateNilIMP(void) {
     static IMP cached;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        id (^block)(id, SEL, void *, void *, void *, void *, void *, void *) =
+        void * (^block)(id, SEL, void *, void *, void *, void *, void *, void *) =
             ^(id self, SEL _cmd, void *a0, void *a1, void *a2, void *a3, void *a4, void *a5) {
                 (void)self; (void)_cmd; (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-                return nil;
+                return NULL;
             };
-        TNAKeep(block);
+        TNAKeep((id)block);
         cached = imp_implementationWithBlock(block);
     });
     return cached;
@@ -869,8 +869,8 @@ static dispatch_queue_t TNAInstallQueue(void) {
 }
 
 static void TNAInstallExplicitSites(NSString *pass) {
-    TNAInstallGateSites(&TNAGateNoSites[0][0], sizeof(TNAGateNoSites) / sizeof(TNAGateNoSites[0]), YES);
-    TNAInstallGateSites(&TNAGateNilSites[0][0], sizeof(TNAGateNilSites) / sizeof(TNAGateNilSites[0]), NO);
+    TNAInstallGateSites(TNAGateNoSites, sizeof(TNAGateNoSites) / sizeof(TNAGateNoSites[0]), YES);
+    TNAInstallGateSites(TNAGateNilSites, sizeof(TNAGateNilSites) / sizeof(TNAGateNilSites[0]), NO);
     for (size_t i = 0; i < sizeof(TNASuppressSites) / sizeof(TNASuppressSites[0]); i++) {
         TNAInstallSite(&TNASuppressSites[i]);
     }
