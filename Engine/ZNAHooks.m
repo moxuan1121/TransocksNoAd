@@ -44,19 +44,48 @@ static void ZNALog(NSString *format, ...) {
     }
 }
 
+// 沙盒里取不出来的日志等于没写，所以一次写盘同时往所有可能的地方各写一份：
+// App 容器 Documents 这一份最关键 —— Zoomable 开了 UIFileSharingEnabled，不用越狱文件管理器、
+// 在系统「文件」App 里就能直接看到。哪个路径先写成功就记进日志，下次只看那一个地方。
+static NSArray<NSString *> *ZNALogPaths(void) {
+    static NSArray<NSString *> *paths;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *home = NSHomeDirectory();
+        paths = @[
+            [home stringByAppendingPathComponent:@"Documents/ZoomableNoAd.log"],
+            [home stringByAppendingPathComponent:@"Library/Caches/ZoomableNoAd.log"],
+            [NSTemporaryDirectory() stringByAppendingPathComponent:@"ZoomableNoAd.log"],
+            @"/private/tmp/ZoomableNoAd.log",
+            @"/var/tmp/ZoomableNoAd.log",
+            @"/var/mobile/Media/ZoomableNoAd.log",
+            @"/var/mobile/Media/Documents/ZoomableNoAd.log",
+        ];
+    });
+    return paths;
+}
+
+// 第一次成功写盘落在了哪条路径；一条都没写成就是 @"(none)"，构造函数会原样记进日志。
+static NSString *ZNALogWrittenPath = nil;
+
 static void ZNAFlushLog(void) {
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ZoomableNoAd.log"];
     NSArray<NSString *> *snapshot;
     @synchronized(ZNAJournal()) {
         snapshot = [ZNAJournal() copy];
     }
     NSString *text = [snapshot componentsJoinedByString:@"\n"];
-    (void)[text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
-    // 沙盒里的日志取不出来就等于没有：这份同时写到 /var/mobile/Media，Filza 或爱思直接能拿到。
-    for (NSString *shared in @[ @"/var/mobile/Media/ZoomableNoAd.log",
-                                @"/var/mobile/Media/Documents/ZoomableNoAd.log" ]) {
-        (void)[text writeToFile:shared atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    for (NSString *path in ZNALogPaths()) {
+        NSError *error = nil;
+        if ([text writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
+            if (!ZNALogWrittenPath) ZNALogWrittenPath = path;
+            continue;
+        }
+        if (error.code != NSFileWriteNoSuchFile && error.code != NSFileWritePathExists) {
+            // Documents / tmp 一类目录不存在是常态，只有真正被沙盒拒绝时才值得占一行日志。
+            ZNALog(@"log write refused %@ (code %ld)", path, (long)error.code);
+        }
     }
+    if (!ZNALogWrittenPath) ZNALogWrittenPath = @"(none)";
 }
 
 static NSMutableArray<id> *ZNAKeepAlive(void) {
@@ -421,6 +450,14 @@ static void ZNAScanOverlays(void) {
         if (![scene isKindOfClass:UIWindowScene.class]) continue;
         [queue addObjectsFromArray:((UIWindowScene *)scene).windows];
     }
+    if (queue.count == 0) {
+        // 没有 scene manifest 的 App（Zoomable 就是）在新系统上通常也会被包一层 windowScene，
+        // 但真包不出来的时候不能整个扫不到 —— 退回老那套 windows。
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [queue addObjectsFromArray:UIApplication.sharedApplication.windows];
+#pragma clang diagnostic pop
+    }
     NSUInteger visited = 0;
     while (queue.count && visited < 900) {
         UIView *view = queue.firstObject;
@@ -463,15 +500,16 @@ typedef struct {
 // 加载/请求一类一律不吞（+[… loadWithAdUnitID:request:completionHandler:]、-[GADAdLoader loadRequest:]）：
 // 挂空之后 SDK 的加载链永远走不到终态，App 侧等回填的那一步就吊在那里。
 //
-// present 按叶子类逐个列，不走父类：GoogleMobileAds 11.x 里 presentFromRootViewController: 只实现
-// 在共享基类 GADFullScreenAd 上，插屏、开屏、激励三份共用同一个 IMP。改基类等于把用户主动看的
-// 激励视频一起吞掉（奖励拿不到），所以在这里点名要压的那两个，安装时在本类补一份覆盖实现。
+// present 按叶子类逐个列，不走父类。这份二进制里（AdMob 11.13，主镜像 __objc_classlist 实测）
+// presentFromRootViewController: 各自实现于 GADAppOpenAd / GADInterstitialAd 本类，而激励用的是
+// 另一个选择子 presentFromRootViewController:userDidEarnRewardHandler:（GADRewardedAd、
+// GADFullScreenAd 上），所以挂前者碰不到用户主动看的那条奖励链。GAMInterstitialAd 本类一份实现都
+// 没有，靠父类 GADInterstitialAd，安装时会在它本类补一份覆盖，不会反过来改父类。
 //
-// 开屏（GADAppOpenAd）故意不进来：它就挂在冷启动/回前台那条链上，把 present 挂空 App 等不到
-// adDidDismissFullScreenContent:，启动流程走不完 —— 穿梭 0.0.1「闪退保住了却卡在开屏」就是这个坑。
-// 开屏改由不牵扯回调的类名遮挡处理：GADFullScreenAdViewController 和 GAD* 渲染层照常跑完自己的
-// 加载、倒计时、关闭流程，只由 ZNADefuse 把盖上来的窗口和视图藏掉，再由它对 presenter 的关闭观察
-// 把「已经关掉」这条通知补回给 App。
+// 开屏（GADAppOpenAd）这一次要进来：Zoomable 是浏览器，主界面在 application:didFinishLaunching
+// 里就搭好了（AppDelegate 自己实现 setWindow:/window），App Open 只是盖在上面的浮层，吞掉 present
+// 并补 ad:didFailToPresent: 之后 App 该看到的界面一个不少 —— 穿梭那次卡住是 Topon 的 CustomBootAd
+// 把根视图切换吊在了广告回调上，形态不同。
 //
 // banner 和原生位也不在这里挂：GADBannerView / GADNativeAdView 本身就是 UIView，类名遮挡会把它们
 // 连子树一起藏掉。AdMob 没有「先问有没有广告再决定展不展示」的同步问询，硬造一道回 NO 的网关只会
@@ -481,6 +519,9 @@ static const ZNASuppressSite ZNASuppressSites[] = {
       "ad:didFailToPresentFullScreenContentWithError:", ZNATerminalSelfErr2 },
     // GAM 是 AdMob 的 managed（Ad Manager）插屏，和 GADInterstitialAd 同一条 present 链。
     { "GAMInterstitialAd", "presentFromRootViewController:", "fullScreenContentDelegate",
+      "ad:didFailToPresentFullScreenContentWithError:", ZNATerminalSelfErr2 },
+    // 开屏：用户这一轮报的就是这一类。
+    { "GADAppOpenAd", "presentFromRootViewController:", "fullScreenContentDelegate",
       "ad:didFailToPresentFullScreenContentWithError:", ZNATerminalSelfErr2 },
 };
 
@@ -549,6 +590,47 @@ static void ZNAInstallSite(const ZNASuppressSite *site) {
 }
 
 
+#pragma mark - global presentation guard
+
+// App 侧一行广告代码都扫不出来（Zoomable 自己的 20 个类全是纯 Swift，ObjC 运行时看不见它们），
+// 广告是 SDK 自己往屏幕上盖的。类名遮挡要等类注册进来才挂得上，冷启动第一弹往往赶不上，
+// 所以在 UIViewController 这一层留一道总闸：任何一次模态呈现都过一遍名字。
+//
+// 这道闸只「藏」不「吞」：原实现照常跑完，SDK 的倒计时、关闭回调、状态机一个不落，我们只是把
+// 盖上来的那一层藏掉、再按宽限期请它离场。所以它不需要补任何终态回调，也就没有掐断别人流程的风险。
+// 系统类的一个方法，签名固定（3 个实参），一次装好就不用再补扫。
+static void ZNAInstallPresentGuard(void) {
+    SEL sel = sel_getUid("presentViewController:animated:completion:");
+    Method method = class_getInstanceMethod(UIViewController.class, sel);
+    if (!method) {
+        ZNALog(@"present guard: -[UIViewController presentViewController:] absent");
+        return;
+    }
+    IMP original = method_getImplementation(method);
+    id block = (id) ^void(id self, id presented, BOOL animated, void *completion) {
+        ((void (*)(id, SEL, id, _Bool, void *))original)(self, sel, presented, animated, completion);
+        if (!presented) return;
+        NSString *className = NSStringFromClass(object_getClass(presented));
+        if (!ZNAIsInterestingClassName(className.UTF8String)) return;
+        atomic_fetch_add_explicit(&ZNAActionCount, 1, memory_order_relaxed);
+        ZNALog(@"present-guard <%@> from %@", className, NSStringFromClass(object_getClass(self)));
+        ZNADefuse(presented);
+        // 广告自带窗口（AdMob 的 App Open 走自己的 window）：只在这条 window 的根就是它本人时藏，
+        // 否则藏的就是 App 主界面了。
+        if (![presented isKindOfClass:UIViewController.class]) return;
+        UIWindow *window = [(UIViewController *)presented viewIfLoaded].window;
+        if (window && window.rootViewController == presented) ZNADefuse(window);
+        ZNAFlushLog();
+    };
+    ZNAKeep(block);
+    IMP replacement = imp_implementationWithBlock(block);
+    if (replacement && original != replacement) {
+        method_setImplementation(method, replacement);
+        ZNAHookedCount++;
+        ZNALog(@"present-guard installed %s", method_getTypeEncoding(method) ?: "");
+    }
+}
+
 #pragma mark - entry
 
 static dispatch_queue_t ZNAInstallQueue(void) {
@@ -577,13 +659,25 @@ __attribute__((constructor)) static void ZoomableNoAdEntry(void) {
         ZNALaunchUptime = NSProcessInfo.processInfo.systemUptime;
         ZNALog(@"ZoomableNoAd attached to %@ / %@", NSProcessInfo.processInfo.processName,
                NSBundle.mainBundle.bundleIdentifier);
-        // 开关文件：真机上出问题又取不到日志时，建一个空的 /var/mobile/Media/ZoomableNoAd.off
-        // 再启动，就能把这一版整个关掉，直接分清是 App 自己卡住还是被钩子卡住。
-        if ([NSFileManager.defaultManager fileExistsAtPath:@"/var/mobile/Media/ZoomableNoAd.off"]) {
-            ZNALog(@"disabled by /var/mobile/Media/ZoomableNoAd.off");
+        // 第一行日志立刻落盘：这一份文件在不在，就是「注入生效了没有」的唯一凭据，
+        // 后面所有 pass 都要等广告类注册才有输出，等不起。
+        ZNAFlushLog();
+        ZNALog(@"log file -> %@", ZNALogWrittenPath);
+        ZNAFlushLog();
+        // 开关文件：出问题又取不到日志时，建一个空的 ZoomableNoAd.off 再启动就能把这一版整个关掉，
+        // 直接分清是 App 自己卡住还是被钩子卡住。两处都认：/var/mobile/Media 要越狱文件管理器，
+        // App 容器 Documents 这一份在系统「文件」App 里就能建。
+        NSString *containerSwitch = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/ZoomableNoAd.off"];
+        NSString *sharedSwitch = @"/var/mobile/Media/ZoomableNoAd.off";
+        NSString *switchPath = [NSFileManager.defaultManager fileExistsAtPath:containerSwitch]
+            ? containerSwitch
+            : ([NSFileManager.defaultManager fileExistsAtPath:sharedSwitch] ? sharedSwitch : nil);
+        if (switchPath) {
+            ZNALog(@"disabled by %@", switchPath);
             ZNAFlushLog();
             return;
         }
+        ZNAInstallPresentGuard();
         ZNAInstallAll(@"launch", YES);
         ZNAInstallExplicitSites(@"launch");
         // 主线程每秒扫一遍界面层，把新出现的 App 自有视图记进日志，先认出来才能屏蔽。
