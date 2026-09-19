@@ -1,13 +1,14 @@
 // 锁死 imp_implementationWithBlock 在 arm64 上的摆位：垫片能不能取到实参、取到的是不是那一个。
 //
 // 为什么要有这个文件：上一版把每个站点都套进同一个「宽块」（self、_cmd 之后声明 6 个 void *），
-// 再在块里按下标取 delegate。穿梭 3.4.0 上 [ATAdManager loadADWithPlacementID:extra:delegate:]
+// 再在块里按下标取 delegate。穿梭 0.0.1 上 [ATAdManager loadADWithPlacementID:extra:delegate:]
 // 当场 objc_retain 到一个野指针（崩溃报告：libobjc objc_retain+16 ← dylib+31760 ← 该发送点），
 // App 启动即闪退。实测原因是运行时根本不把 _cmd 下发给块：块拿到的第 2 个形参就是第 1 个实参，
 // 于是宽块里每一个槽位都比表里的下标少一格，最后一格读的是脏寄存器。
 //
-// 所以 Engine/TNAHooks.m 的写法是：块按目标方法的实参个数分族（0..6），每族恰好声明那么多形参，
+// 所以 Engine/ZNAHooks.m 的写法是：块只声明它真正要用的那几位（显式站点表统一只带 self），
 // 第一个形参是接收者，之后依次是第 1..n 个实参，需要选择子的地方在装钩子时捕获。
+// 声明多了会把脏寄存器当对象用，声明少了只是够不着后面的参数 —— 少是安全的，多不是。
 // 本探针把这个约定当成断言跑一遍：哪天运行时改了摆位，CI 先红，而不是用户那边先闪退。
 //
 // 只给 CI 的主机步骤用（clang -framework Foundation），不参与 iOS 打包。
@@ -72,7 +73,7 @@ static IMP directIMP(unsigned int n) {
 }
 
 // B 族：块先落到局部变量里、由全局持有，再把变量交给 imp_implementationWithBlock ——
-// TNAHooks.m 里的 TNAKeep(block) 就是这个形状，两种写法都得测。
+// ZNAHooks.m 里的 ZNAKeep(block) 就是这个形状，两种写法都得测。
 static id gKept[16];
 static unsigned int gKeptCount;
 
@@ -210,7 +211,7 @@ int main(void) {
     setbuf(stdout, NULL);  // 万一又被段错误带走，至少留下已经测出来的那几行
     @autoreleasepool {
         for (int i = 0; i < 6; i++) gToken[i] = 1000 + i;
-        Class cls = objc_allocateClassPair(NSObject.class, "TNAAbiHost", 0);
+        Class cls = objc_allocateClassPair(NSObject.class, "ZNAAbiHost", 0);
         objc_registerClassPair(cls);
         id target = [[cls alloc] init];
 
@@ -221,7 +222,7 @@ int main(void) {
         for (unsigned int n = 0; n <= 6; n++) failures += probe(indirectIMP, target, n, 10 + n);
 
         printf("%s\n", failures ? "ABI MISMATCH: shims do not receive arguments the way "
-                                  "Engine/TNAHooks.m assumes"
+                                  "Engine/ZNAHooks.m assumes"
                                 : "ABI ok: block params are (receiver, arg1..argn); _cmd is not delivered");
         return failures ? 1 : 0;
     }

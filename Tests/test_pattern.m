@@ -1,5 +1,5 @@
 #import <Foundation/Foundation.h>
-#import "TNAPattern.h"
+#import "ZNAPattern.h"
 #import <stdio.h>
 
 static int failures = 0;
@@ -12,101 +12,111 @@ static const char *const presentSelectors[] = {
     "layoutSubviews", "makeKeyAndVisible", "show", "showAdInView", "presentAd", "renderAd",
 };
 
-// 兜底层永远不碰加载/请求：v0.0.1 就是把这一层挂成了空实现，宿主 App 等不到 SDK 回调、卡在开屏页。
+// 兜底层永远不碰加载/请求：v0.0.1 的教训是把这一层挂成空实现，宿主 App 等不到 SDK 回调、卡在开屏页。
 static const char *const loadSelectors[] = {
-    "loadAd", "loadAdData", "loadADInfo", "start", "getAdData", "fetchAd", "requestAd", "prepareToShow",
-    "registerAdapter:", "setDelegate:", "loadGDTAd", "loadTopOnAd", "loadSplashAD",
+    "loadWithAdUnitID:request:completionHandler:", "loadRequest:", "loadAd", "fetchAd", "getAdData",
+    "start", "startWithConfiguration:", "registerView", "setDelegate:", "addDelegate:",
 };
 
-// App 自己的广告宿主（Swift 类只有实现 SDK 协议的方法才进 ObjC 运行时）。
-static const char *const appHostClasses[] = {
-    "_TtC13Transocks_iOS10AdsManager", "_TtC13Transocks_iOS12CustomBootAd", "_TtC13Transocks_iOS12ToponManager",
-    "_TtCO13Transocks_iOS7ToponAd12SplashAdaper", "_TtCO13Transocks_iOS7ToponAd18InterstitialAdaper",
-    "_TtC13Transocks_iOS16GADOpenAdAdapter", "_TtC13Transocks_iOS18GADNativeAdAdapter",
-    "_TtC13Transocks_iOS24GADInterstitialAdAdapter",
+// AdMob 的门面类与渲染层：这些必须进候选表。
+static const char *const sdkClasses[] = {
+    "GADMobileAds", "GADRequest", "GADInterstitialAd", "GADAppOpenAd", "GADAdLoader", "GADBannerView",
+    "GADNativeAdView", "GADCustomNativeAd", "GADFullScreenAd", "GADFullScreenAdViewController",
+    "GAMInterstitialAd", "GAMBannerView", "GADMediationInterstitialAdRenderer", "GADAdChoicesView",
 };
 
-// 三家 SDK 的门面类。
-static const char *const sdkFaceClasses[] = {
-    "ATAdManager", "ATSplash", "ATSplashManager", "ATBanner", "ATInterstitial", "ATNative", "ATNativeAdView",
-    "ATMediaPlayer", "ATADXAdManager", "ATInterstitialAutoAdManager", "GDTSplashAd", "GDTUnifiedInterstitialAd",
-    "GDTUnifiedBannerView", "GDTSDKConfig", "GADInterstitialAd", "GADAppOpenAd", "GADAdLoader", "GADBannerView",
+// App 自己那层（Zoomable 全是纯 Swift，只有这些业务名进了 ObjC 运行时）。
+// 一个都不该被规则命中：命中了就是拿业务界面当广告藏。
+static const char *const appClasses[] = {
+    "_TtC7Browser10AddressBar", "_TtC7Browser11AppDelegate", "_TtC7Browser11TabGridView",
+    "_TtC7Browser15DownloadManager", "_TtC7Browser21BrowserViewController",
+    "_TtC7Browser21ProUpgradeViewController", "_TtC7Browser22ProPurchaseController",
+    "_TtC7Browser22WebPopupViewController", "_TtC7Browser9ZMWebView",
 };
 
-// 名字里带 Ad 但不是广告的 App 业务类：规则一放宽就会被误伤。
+// 名字里带 Ad/GDT 但不是广告的第三方类：规则一放宽就会被误伤。
 static const char *const ignoredClasses[] = {
-    "_TtC13Transocks_iOS20RuleAddPopController", "_TtC13Transocks_iOS17UpgradeController",
-    "_TtC13Transocks_iOS23RouterUpgradeController", "_TtC13Transocks_iOS20RouterRuleHeaderView",
-    "_TtC13Transocks_iOS24SettingSectionHeaderView", "JCOREAddress", "JCOREMacAddressManager",
-    "JPUSHAddressConfigController", "APMAdExposureReporter", "APMPBAdCampaignInfo", "FIRCLSReportAdapter",
-    "ABTExperimentPayload", "AccountBannerView", "AddressBookViewController", "DownloadViewController",
+    // RevenueCat 的「广告事件上报」，跟展示无关。
+    "_TtC10RevenueCat12AdEventStore", "_TtC10RevenueCat21PostAdEventsOperation",
+    "_TtC10RevenueCat19PaywallCacheWarming", "ProUpgradeViewController", "AccountBannerView",
+    "AddressBookViewController", "DownloadViewController", "AdHocSignature", "FIRCLSReportAdapter",
+    // GDTCOR*/GDTCCT* 是 Google 自己的传输层，不是优量汇：这条是这套规则最容易踩的坑。
+    "GDTCORApplication", "GDTCOREvent", "GDTCCTUploader", "GDTMetricsSupport",
+    "_TtC16FirebaseSessions14EventGDTLogger",
 };
 
 // 激励视频（用户主动换权益）与隐私同意弹窗（合规流程）：一律不参与。
 static const char *const outOfScopeClasses[] = {
-    "ATRewardedVideoAd", "ATRewardVideoAd", "ATADXRewardedVideoAdapter", "ATIVRewardModel",
-    "ATConsentPrivacySetting", "ATUMPConsentHandler", "UMPConsentForm", "UMPAppTransparencyStub",
+    "GADRewardedAd", "GADRewardedInterstitialAd", "GADMediationRewardedAdRenderer", "GADAdReward",
+    "UMPConsentForm", "UMPConsentInformation", "UMPConsentViewController", "UMPAppTransparencyStub",
+    "UMPView",
 };
 
 static BOOL AnyPresentHit(const char *className) {
     for (size_t i = 0; i < sizeof(presentSelectors) / sizeof(presentSelectors[0]); i++) {
-        if (TNAActionForClass(className, presentSelectors[i]) != TNAActionNone) return YES;
+        if (ZNAActionForClass(className, presentSelectors[i]) != ZNAActionNone) return YES;
     }
     return NO;
 }
 
 int main(void) {
     @autoreleasepool {
-        CHECK(TNAMatchGlob("CustomBootAd", "*SplashAd|*BootAd*"));
-        CHECK(TNAMatchGlob("ATAdManager", "ATAdManager|ATInitModule"));
-        CHECK(TNAMatchGlob("GDTSplashAd", "GDT*"));
-        CHECK(!TNAMatchGlob("RuleAddPopController", "*Ad|*AD|AD*"));
-        CHECK(!TNAMatchGlob("AddressBookViewController", "*Ad"));
-        CHECK(!TNAMatchGlob("oad", "*AD"));
-        CHECK(TNAMatchGlob("_TtC13Transocks_iOS10AdsManager", "*AdsManager*"));
+        CHECK(ZNAMatchGlob("GADAppOpenAd", "GAD*|*AppOpen*"));
+        CHECK(ZNAMatchGlob("GADInterstitialAd", "*Interstitial*"));
+        CHECK(!ZNAMatchGlob("RuleAddPopController", "*Ad|*AD|AD*"));
+        CHECK(!ZNAMatchGlob("AddressBookViewController", "*AdView*|*AdBanner*"));
+        CHECK(!ZNAMatchGlob("AddressBar", "*AdView*|*BannerAd*|*AdBanner*"));
+        CHECK(!ZNAMatchGlob("oad", "*AD"));
+        CHECK(!ZNAMatchGlob("GDTCORApplication", "GAD*|GAM*|*AdView*|*AdUnit*"));
 
-        for (size_t i = 0; i < sizeof(appHostClasses) / sizeof(appHostClasses[0]); i++) {
-            CHECK(TNAIsInterestingClassName(appHostClasses[i]));
-        }
-        for (size_t i = 0; i < sizeof(sdkFaceClasses) / sizeof(sdkFaceClasses[0]); i++) {
-            CHECK(TNAIsInterestingClassName(sdkFaceClasses[i]));
+        for (size_t i = 0; i < sizeof(sdkClasses) / sizeof(sdkClasses[0]); i++) {
+            CHECK(ZNAIsInterestingClassName(sdkClasses[i]));
         }
 
         // 业务类：既不能进候选表，也不能被挂任何展示层钩子。
-        for (size_t i = 0; i < sizeof(ignoredClasses) / sizeof(ignoredClasses[0]); i++) {
-            CHECK(!TNAIsInterestingClassName(ignoredClasses[i]));
+        for (size_t i = 0; i < sizeof(appClasses) / sizeof(appClasses[0]); i++) {
+            CHECK(!ZNAIsInterestingClassName(appClasses[i]));
             for (size_t s = 0; s < sizeof(presentSelectors) / sizeof(presentSelectors[0]); s++) {
-                CHECK(TNAActionForClass(ignoredClasses[i], presentSelectors[s]) == TNAActionNone);
+                CHECK(ZNAActionForClass(appClasses[i], presentSelectors[s]) == ZNAActionNone);
+            }
+        }
+        for (size_t i = 0; i < sizeof(ignoredClasses) / sizeof(ignoredClasses[0]); i++) {
+            CHECK(!ZNAIsInterestingClassName(ignoredClasses[i]));
+            for (size_t s = 0; s < sizeof(presentSelectors) / sizeof(presentSelectors[0]); s++) {
+                CHECK(ZNAActionForClass(ignoredClasses[i], presentSelectors[s]) == ZNAActionNone);
             }
         }
         for (size_t i = 0; i < sizeof(outOfScopeClasses) / sizeof(outOfScopeClasses[0]); i++) {
-            CHECK(!TNAIsInterestingClassName(outOfScopeClasses[i]));
-            CHECK(!TNAIsLaunchClassName(outOfScopeClasses[i]));
+            CHECK(!ZNAIsInterestingClassName(outOfScopeClasses[i]));
+            CHECK(!ZNAIsLaunchClassName(outOfScopeClasses[i]));
+            CHECK(ZNAActionForClass(outOfScopeClasses[i], "presentFromRootViewController:") == ZNAActionNone);
         }
 
         for (size_t i = 0; i < sizeof(loadSelectors) / sizeof(loadSelectors[0]); i++) {
-            CHECK(TNAActionForClass("ATAdManager", loadSelectors[i]) == TNAActionNone);
-            CHECK(TNAActionForClass("GDTSplashAd", loadSelectors[i]) == TNAActionNone);
-            CHECK(TNAActionForClass("_TtC13Transocks_iOS10AdsManager", loadSelectors[i]) == TNAActionNone);
+            CHECK(ZNAActionForClass("GADAdLoader", loadSelectors[i]) == ZNAActionNone);
+            CHECK(ZNAActionForClass("GADInterstitialAd", loadSelectors[i]) == ZNAActionNone);
+            CHECK(ZNAActionForClass("GADMobileAds", loadSelectors[i]) == ZNAActionNone);
         }
 
-        CHECK(TNAActionForClass("_TtC13Transocks_iOS10AdsManager", "viewDidAppear:") == TNAActionDefuse);
-        CHECK(TNAActionForClass("GDTSplashViewController", "viewDidAppear:") == TNAActionDefuse);
-        CHECK(TNAActionForClass("GADBannerView", "layoutSubviews") == TNAActionDefuse);
-        CHECK(TNAActionForClass("ATTSplashADView", "didMoveToWindow") == TNAActionDefuse);
-        CHECK(TNAActionForClass("ATBanner", "dealloc") == TNAActionNone);
-        CHECK(TNAActionForClass("ATBanner", "viewDidLoad") == TNAActionNone);
-        CHECK(TNAActionForClass("ATBanner", "class") == TNAActionNone);
+        CHECK(ZNAActionForClass("GADInterstitialAd", "presentFromRootViewController:") == ZNAActionDefuse);
+        CHECK(ZNAActionForClass("GADBannerView", "layoutSubviews") == ZNAActionDefuse);
+        CHECK(ZNAActionForClass("GADNativeAdView", "didMoveToWindow") == ZNAActionDefuse);
+        CHECK(ZNAActionForClass("GADFullScreenAdViewController", "viewDidAppear:") == ZNAActionDefuse);
+        CHECK(ZNAActionForClass("GADAppOpenAd", "viewWillAppear:") == ZNAActionDefuse);
+        CHECK(ZNAActionForClass("GADBannerView", "dealloc") == ZNAActionNone);
+        CHECK(ZNAActionForClass("GADBannerView", "viewDidLoad") == ZNAActionNone);
+        CHECK(ZNAActionForClass("GADBannerView", "class") == ZNAActionNone);
 
-        CHECK(TNAIsSplashLikeName("_TtC13Transocks_iOS12CustomBootAd"));
-        CHECK(TNAIsSplashLikeName("GDTSplashAd"));
-        CHECK(!TNAIsSplashLikeName("GDTUnifiedInterstitialAd"));
-        CHECK(!TNAIsSplashLikeName("GADInterstitialAd"));
+        CHECK(ZNAIsSplashLikeName("GADAppOpenAd"));
+        CHECK(ZNAIsSplashLikeName("GADMediationAppOpenAdRenderer"));
+        CHECK(!ZNAIsSplashLikeName("GADInterstitialAd"));
+        CHECK(!ZNAIsSplashLikeName("GADBannerView"));
 
-        for (size_t i = 0; i < sizeof(appHostClasses) / sizeof(appHostClasses[0]); i++) {
-            if (!TNAIsInterestingClassName(appHostClasses[i]) && !AnyPresentHit(appHostClasses[i])) {
+        // 广告 SDK 的类名一律以 GAD/GAM 打头，App 层不暴露名字 —— 兜底表要覆盖的就是这一批。
+        for (size_t i = 0; i < sizeof(sdkClasses) / sizeof(sdkClasses[0]); i++) {
+            if (!ZNAIsInterestingClassName(sdkClasses[i]) && !AnyPresentHit(sdkClasses[i])) {
                 failures++;
-                printf("FAIL app host not covered: %s\n", appHostClasses[i]);
+                printf("FAIL sdk class not covered: %s\n", sdkClasses[i]);
             }
         }
 
@@ -114,12 +124,12 @@ int main(void) {
         const char *const selectorCorpus[] = {
             "viewDidAppear:", "viewWillAppear:", "viewDidLayoutSubviews", "didMoveToWindow", "willMoveToWindow:",
             "layoutSubviews", "makeKeyAndVisible", "show", "showAd", "showInView:", "presentAd", "renderAd",
-            "showSplashWithPlacementID:scene:window:delegate:", "presentFromRootViewController:",
-            "loadAd", "loadAdData", "startWithAppID:", "dealloc", "init", "class", "respondsToSelector:",
-            "viewDidLoad", "description", "hidden", "setHidden:", "shareInstance", "isKindOfClass:",
+            "presentFromRootViewController:", "loadWithAdUnitID:request:completionHandler:", "loadRequest:",
+            "startWithConfiguration:", "dealloc", "init", "class", "respondsToSelector:", "viewDidLoad",
+            "description", "hidden", "setHidden:", "shareInstance", "isKindOfClass:",
         };
         for (size_t i = 0; i < sizeof(selectorCorpus) / sizeof(selectorCorpus[0]); i++) {
-            CHECK(TNAIsPresentationSelector(selectorCorpus[i]) == TNAIsPresentationSelectorSlow(selectorCorpus[i]));
+            CHECK(ZNAIsPresentationSelector(selectorCorpus[i]) == ZNAIsPresentationSelectorSlow(selectorCorpus[i]));
         }
 
         // 类名：拿真机二进制的类名表回归，快速路径和逐条通配匹配不能有半个字的分歧。
@@ -131,32 +141,40 @@ int main(void) {
             printf("SKIP corpus %s (fast matcher not regression-checked)\n", corpusPath.UTF8String);
         } else {
             NSArray<NSString *> *names = [corpus componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet];
-            NSUInteger interesting = 0, launch = 0, divergence = 0, missedSplash = 0;
+            NSUInteger interesting = 0, launch = 0, divergence = 0, missedSplash = 0, appOwned = 0;
             for (NSString *name in names) {
                 if (name.length == 0) continue;
                 const char *utf8 = name.UTF8String;
-                if (TNAIsInterestingClassName(utf8) != TNAIsInterestingClassNameSlow(utf8)) {
+                if (ZNAIsInterestingClassName(utf8) != ZNAIsInterestingClassNameSlow(utf8)) {
                     divergence++;
                     if (divergence < 10) printf("FAIL fast/slow mismatch: %s\n", utf8);
                 }
-                if (!TNAIsInterestingClassName(utf8)) {
-                    CHECK(!TNAIsLaunchClassName(utf8));
+                // 主二进制里带 _TtC7Browser 前缀的是 App 自己的类，一个都不该被命中：
+                // 命中就说明规则放宽到了业务名上。
+                if (strstr(utf8, "_TtC7Browser")) {
+                    CHECK(!ZNAIsInterestingClassName(utf8));
+                    appOwned++;
+                }
+                if (!ZNAIsInterestingClassName(utf8)) {
+                    CHECK(!ZNAIsLaunchClassName(utf8));
                     continue;
                 }
                 interesting++;
-                if (TNAIsLaunchClassName(utf8)) {
+                if (ZNAIsLaunchClassName(utf8)) {
                     launch++;
-                } else if (TNAIsSplashLikeName(utf8)) {
+                } else if (ZNAIsSplashLikeName(utf8)) {
                     missedSplash++;
                     if (missedSplash < 10) printf("FAIL launch-critical class missed: %s\n", utf8);
                 }
             }
             CHECK(divergence == 0);
             CHECK(missedSplash == 0);
+            CHECK(appOwned > 0);
             // 冷启动主线程只挂 launch 这一批，太多就说明那道预筛没起作用。
             CHECK(launch < 200);
-            printf("corpus: %lu interesting (%lu launch) of %lu classes\n", (unsigned long)interesting,
-                   (unsigned long)launch, (unsigned long)names.count);
+            printf("corpus: %lu interesting (%lu launch) of %lu classes, %lu app-owned\n",
+                   (unsigned long)interesting, (unsigned long)launch, (unsigned long)names.count,
+                   (unsigned long)appOwned);
         }
 
         printf(failures ? "%d checks failed\n" : "pattern rules ok\n", failures);

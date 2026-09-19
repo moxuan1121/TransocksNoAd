@@ -2,6 +2,6 @@
 packages/
 *.deb
 .DS_Store
-Tests/transocksnoad-glob
-Tests/transocksnoad-pattern
+Tests/zoomablenoad-glob
+Tests/zoomablenoad-pattern
 rule_hits.txt

@@ -1,4 +1,4 @@
-"""Mirror of Engine/TNAPattern.m so the rule table can be reviewed before a device test.
+"""Mirror of Engine/ZNAPattern.m so the rule table can be reviewed before a device test.
 
 Reads the real #define strings out of the source, replays the C glob/action logic,
 and reports coverage over the class dump of the shipped binary (piped on stdin, one
@@ -8,11 +8,11 @@ an iOS toolchain.
 import re
 import sys
 
-src = open('Engine/TNAPattern.m', encoding='utf-8').read()
+src = open('Engine/ZNAPattern.m', encoding='utf-8').read()
 src = re.sub(r'\\\n\s*', ' ', src)
 # join every string literal that belongs to one #define
 defs = {m.group(1): ''.join(re.findall(r'"([^"]*)"', m.group(2)))
-        for m in re.finditer(r'#define\s+(TNA_\w+)\s+(.*?)(?=\n\S|\Z)', src, re.S)
+        for m in re.finditer(r'#define\s+(ZNA_\w+)\s+(.*?)(?=\n\S|\Z)', src, re.S)
         if '"' in m.group(2)}
 
 
@@ -25,39 +25,35 @@ def resolve(token):
 
 
 RULES = [(resolve(c), resolve(s), a) for c, s, a in
-         re.findall(r'\{\s*(TNA_\w+|"[^"]*"),\s*(TNA_\w+|"[^"]*"),\s*(TNAAction\w+)\s*\}',
-                    between(r'static const TNARule TNARules\[\] = \{(.*?)\};'))]
+         re.findall(r'\{\s*(ZNA_\w+|"[^"]*"),\s*(ZNA_\w+|"[^"]*"),\s*(ZNAAction\w+)\s*\}',
+                    between(r'static const ZNARule ZNARules\[\] = \{(.*?)\};'))]
 FORBIDDEN = [x.strip().strip('",') for x in
-             between(r'TNAForbiddenSelectors\[\] = \{(.*?)\};').split(',') if x.strip().startswith('"')]
+             between(r'ZNAForbiddenSelectors\[\] = \{(.*?)\};').split(',') if x.strip().startswith('"')]
 SPLASH = [x.strip().strip('",') for x in
-          between(r'TNASplashMarkers\[\] = \{(.*?)\};').split(',') if x.strip().startswith('"')]
+          between(r'ZNASplashMarkers\[\] = \{(.*?)\};').split(',') if x.strip().startswith('"')]
 LAUNCH = [x.strip().strip('",') for x in
-          between(r'TNALaunchMarkers\[\] = \{(.*?)\};').split(',') if x.strip().startswith('"')]
+          between(r'ZNALaunchMarkers\[\] = \{(.*?)\};').split(',') if x.strip().startswith('"')]
 EXCLUDED = [x.strip().strip('",') for x in
             between(r'static const char \*markers\[\] = \{(.*?)\};').split(',') if x.strip().startswith('"')]
+
+CORPUS = 'Tests/corpus_classes.txt'
 
 # 展示层选择器：这些才允许被挂钩。
 PRESENT = ['viewDidAppear:', 'viewWillAppear:', 'viewDidLayoutSubviews', 'didMoveToWindow', 'willMoveToWindow:',
            'layoutSubviews', 'makeKeyAndVisible', 'show', 'showAdInView', 'presentAd', 'renderAd']
-# App 自己的广告宿主 + 三家 SDK 的门面类，必须一个不落。
-APP_HOSTS = ['_TtC13Transocks_iOS10AdsManager', '_TtC13Transocks_iOS12CustomBootAd',
-             '_TtCO13Transocks_iOS7ToponAd12SplashAdaper', '_TtCO13Transocks_iOS7ToponAd18InterstitialAdaper',
-             '_TtC13Transocks_iOS16GADOpenAdAdapter', '_TtC13Transocks_iOS18GADNativeAdAdapter',
-             '_TtC13Transocks_iOS24GADInterstitialAdAdapter']
-SDK_FACES = ['ATAdManager', 'ATSplashAd', 'ATBanner', 'ATInterstitial', 'ATNative', 'ATNativeAdView',
-             'ATMediaPlayer', 'ATADXAdManager', 'GDTSplashAd', 'GDTUnifiedInterstitialAd', 'GDTUnifiedBannerView',
-             'GDTSDKConfig', 'GADInterstitialAd', 'GADAppOpenAd', 'GADAdLoader', 'GADBannerView',
-             'GADMAdNetworkAdapterLifecycleProxyTestAnimationDelegator']
-
-# 业务类：名字里带 Ad 但不是广告，规则一旦放宽就会误伤。
-IGNORED = ['_TtC13Transocks_iOS20RuleAddPopController', '_TtC13Transocks_iOS17UpgradeController',
-           '_TtC13Transocks_iOS23RouterUpgradeController', '_TtC13Transocks_iOS20RouterRuleHeaderView',
-           '_TtC13Transocks_iOS24SettingSectionHeaderView', 'JCOREAddress', 'JCOREMacAddressManager',
-           'JPUSHAddressConfigController', 'APMAdExposureReporter', 'APMPBAdCampaignInfo',
-           'FIRCLSReportAdapter', 'ABTExperimentPayload', 'DownloadHandler', 'AdHocSignature']
+# AdMob 的门面类与渲染层，必须一个不落。
+SDK_CLASSES = ['GADMobileAds', 'GADInterstitialAd', 'GADAppOpenAd', 'GADAdLoader', 'GADBannerView',
+               'GADNativeAdView', 'GADCustomNativeAd', 'GADFullScreenAd', 'GADFullScreenAdViewController',
+               'GAMInterstitialAd', 'GAMBannerView', 'GADMediationInterstitialAdRenderer']
+# 名字里带 Ad / GDT 但不是广告的类，规则一放宽就会误伤。
+IGNORED = ['_TtC7Browser10AddressBar', '_TtC7Browser15DownloadManager', '_TtC7Browser22WebPopupViewController',
+           '_TtC10RevenueCat12AdEventStore', '_TtC10RevenueCat21PostAdEventsOperation', 'AccountBannerView',
+           'AddressBookViewController', 'DownloadViewController', 'AdHocSignature', 'FIRCLSReportAdapter',
+           'GDTCORApplication', 'GDTCOREvent', 'GDTCCTUploader', 'GDTMetricsSupport',
+           '_TtC16FirebaseSessions14EventGDTLogger']
 # 激励视频与隐私同意：用户主动换权益 / 合规流程，一律不碰。
-OUT_OF_SCOPE = ['ATRewardedVideoAd', 'ATRewardVideoAd', 'ATConsentPrivacySetting', 'ATUMPConsentHandler',
-                'UMPConsentForm', 'UMPAppTransparencyStub', 'ATADXRewardedVideoAdapter', 'ATIVRewardModel']
+OUT_OF_SCOPE = ['GADRewardedAd', 'GADRewardedInterstitialAd', 'GADMediationRewardedAdRenderer', 'GADAdReward',
+                'UMPConsentForm', 'UMPConsentInformation', 'UMPConsentViewController', 'UMPAppTransparencyStub']
 
 
 def glob(name, pat):
@@ -104,6 +100,11 @@ def is_splash(cls):
     return any(m in cls for m in SPLASH)
 
 
+def corpus():
+    with open(CORPUS, encoding='utf-8') as fh:
+        return [l.strip() for l in fh if l.strip()]
+
+
 def assertions():
     bad = []
 
@@ -111,10 +112,12 @@ def assertions():
         if not cond:
             bad.append(label)
 
-    ck(any_glob('CustomBootAd', '*BootAd|*SplashAd|*Splash*'), 'glob-bootad')
+    ck(any_glob('GADAppOpenAd', 'GAD*|*AppOpen*'), 'glob-appopen')
     ck(not any_glob('RuleAddPopController', '*Ad|*AD|AD*'), 'glob-addpop')
     ck(not any_glob('AddressBookViewController', '*AdView*|*AdBanner*'), 'glob-address')
-    for c in APP_HOSTS + SDK_FACES:
+    # 这套规则最容易踩的坑：GDTCOR*/GDTCCT* 是 Google 的传输层，不是优量汇。
+    ck(not any_glob('GDTCORApplication', 'GAD*|GAM*|*AdView*|*AdUnit*'), 'glob-gdtcor')
+    for c in SDK_CLASSES:
         ck(is_interesting(c) or any(action_for(c, s) != 'None' for s in PRESENT), 'cover ' + c)
     for c in IGNORED:
         ck(not is_interesting(c), 'ignore-class ' + c)
@@ -123,22 +126,23 @@ def assertions():
     for c in OUT_OF_SCOPE:
         ck(not is_interesting(c), 'out-of-scope ' + c)
         ck(not is_launch(c), 'out-of-scope-launch ' + c)
+        ck(action_for(c, 'presentFromRootViewController:') == 'None', 'out-of-scope-present ' + c)
     for s in FORBIDDEN:
-        ck(action_for('GDTSplashAd', s) == 'None', 'forbidden ' + s)
-    for s in ['loadAd', 'loadAdData', 'start', 'getAdData', 'fetchAd']:
-        ck(action_for('ATAdManager', s) == 'None', 'defuse-never-hook ' + s)
-    ck(action_for('GADBannerView', 'layoutSubviews') == 'TNAActionDefuse', 'defuse-view')
-    ck(action_for('_TtC13Transocks_iOS10AdsManager', 'viewDidAppear:') != 'None', 'host-vc')
-    ck(is_splash('_TtC13Transocks_iOS12CustomBootAd'), 'splash-marker-bootad')
-    ck(is_splash('GDTSplashAd') and not is_splash('GADInterstitialAd'), 'splash-marker')
-    for c in ('_TtC13Transocks_iOS12CustomBootAd', 'GDTSplashAd', 'ATSplashAd', 'GADAppOpenAd',
-              '_TtC13Transocks_iOS10AdsManager'):
+        ck(action_for('GADBannerView', s) == 'None', 'forbidden ' + s)
+    for s in ['loadWithAdUnitID:request:completionHandler:', 'loadRequest:', 'start', 'fetchAd']:
+        ck(action_for('GADAdLoader', s) == 'None', 'defuse-never-hook ' + s)
+    ck(action_for('GADBannerView', 'layoutSubviews') == 'ZNAActionDefuse', 'defuse-view')
+    ck(action_for('GADFullScreenAdViewController', 'viewDidAppear:') == 'ZNAActionDefuse', 'defuse-fullscreen-vc')
+    ck(is_splash('GADAppOpenAd') and not is_splash('GADInterstitialAd'), 'splash-marker')
+    for c in ('GADAppOpenAd', 'GADMediationAppOpenAdRenderer'):
         ck(is_launch(c), 'launch ' + c)
-    ck(not is_launch('ATAdManager'), 'not-launch ATAdManager')
+    ck(not is_launch('GADInterstitialAd'), 'not-launch GADInterstitialAd')
     # 开屏一类必须全部落在冷启动那道筛里，否则第一次开屏会等后台 pass（+0.2s）才挂上。
-    ck(all(not (is_interesting(c) and is_splash(c)) or is_launch(c) for c in
-           [l.strip() for l in open('Tests/corpus_classes.txt', encoding='utf-8') if l.strip()]),
+    ck(all(not (is_interesting(c) and is_splash(c)) or is_launch(c) for c in corpus()),
        'splash-like class missed by launch pass')
+    # App 自己的类一个都不该命中：命中了就是拿业务界面当广告藏。
+    ck(any('_TtC7Browser' in c for c in corpus()), 'corpus is not the Zoomable dump')
+    ck(not [c for c in corpus() if '_TtC7Browser' in c and is_interesting(c)], 'app class caught by rules')
     return bad
 
 
@@ -161,10 +165,13 @@ def main():
         with open('rule_hits.txt', 'w', encoding='utf-8') as fh:
             for c in sorted(hits):
                 fh.write(f'{c} {" ".join(hits[c])}\n')
-        swift = [c for c in sorted(hits) if not re.match(r'^(AT|GDT|GAD|GAM)', c)]
-        print('non-SDK classes hooked:', file=sys.stderr)
-        for c in swift:
+        non_admob = [c for c in sorted(hits) if not re.match(r'^(GAD|GAM)', c)]
+        print('classes hooked that are not AdMob-owned (review these):', file=sys.stderr)
+        for c in non_admob:
             print('  ', c, hits[c], file=sys.stderr)
+        print('launch pass candidates:', file=sys.stderr)
+        for c in sorted(launch):
+            print('  ', c, file=sys.stderr)
     print('ASSERTIONS', 'FAILED ' + str(len(bad)) if bad else 'ok')
     sys.exit(1 if bad else 0)
 

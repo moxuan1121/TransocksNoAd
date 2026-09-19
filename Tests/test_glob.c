@@ -1,4 +1,4 @@
-#include "TNAGlob.h"
+#include "ZNAGlob.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -7,27 +7,28 @@ static int failures = 0;
 #define CHECK(cond) do { if (!(cond)) { failures++; printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond); } } while (0)
 
 int main(void) {
-    CHECK(TNAMatchGlob("CustomBootAd", "*BootAd|*SplashAd|*Splash*"));
-    CHECK(TNAMatchGlob("GDTSplashAd", "*SplashAd"));
-    CHECK(TNAMatchGlob("ATAdManager", "ATAdManager|ATInitModule"));
-    CHECK(TNAMatchGlob("ATInitModule", "ATAdManager|ATInitModule"));
-    CHECK(TNAMatchGlob("GADAppOpenAd", "GAD*|*AppOpenAd*"));
-    CHECK(TNAMatchGlob("_TtC13Transocks_iOS10AdsManager", "*AdsManager*"));
-    CHECK(TNAMatchGlob("_TtC13Transocks_iOS18GADNativeAdAdapter", "*GAD*Adapter*"));
-    CHECK(TNAMatchGlob("ATADXSplashAdapter", "AT*|GDT*|GAD*"));
+    CHECK(ZNAMatchGlob("GADAppOpenAd", "*AppOpen*|*SplashAd|*Splash*"));
+    CHECK(ZNAMatchGlob("GADMediationAppOpenAdRenderer", "GAD*|*AppOpenAd*"));
+    CHECK(ZNAMatchGlob("GADMobileAds", "GADMobileAds|GADRequest"));
+    CHECK(ZNAMatchGlob("GADRequest", "GADMobileAds|GADRequest"));
+    CHECK(ZNAMatchGlob("GADInterstitialAd", "GAD*|*Interstitial*"));
+    CHECK(ZNAMatchGlob("GADNativeAdView", "*AdView*|*NativeAd*"));
+    CHECK(ZNAMatchGlob("GAMInterstitialAd", "GAM*|GAD*"));
 
-    // 业务侧以 Ad 开头的名字（AddDevice/Address/ADs 无关项）不能被前缀规则顺手捞走。
-    CHECK(!TNAMatchGlob("RuleAddPopController", "*Ad|*AD|AD*|AT*"));
-    CHECK(!TNAMatchGlob("AddressBookViewController", "AD*"));
-    CHECK(!TNAMatchGlob("AccountBannerView", "*AdBanner*|*BannerAd*"));
-    CHECK(!TNAMatchGlob("UpgradeController", "*AdView*|*AdUnit*"));
-    CHECK(!TNAMatchGlob("oad", "*AD"));
-    CHECK(!TNAMatchGlob("ATAdManager", "ATInitModule|GDT*"));
-    CHECK(!TNAMatchGlob("BU", "AT*|"));
-    CHECK(TNAMatchGlob("AT", "AT*"));
-    CHECK(TNAMatchGlob("AT", "AT|GDT*"));
-    CHECK(TNAMatchGlob("AXB", "A?B"));
-    CHECK(!TNAMatchGlob("AB", "A?B"));
+    // 业务侧以 Ad 开头的名字（AddDevice/Address/AdEvent 无关项）不能被前缀规则顺手捞走。
+    CHECK(!ZNAMatchGlob("_TtC7Browser10AddressBar", "*Ad|*AD|AD*|GAD*"));
+    CHECK(!ZNAMatchGlob("AddressBookViewController", "AD*"));
+    CHECK(!ZNAMatchGlob("AccountBannerView", "*AdBanner*|*BannerAd*"));
+    CHECK(!ZNAMatchGlob("UpgradeController", "*AdView*|*AdUnit*"));
+    CHECK(!ZNAMatchGlob("AdEventStore", "*AdView*|*AdLoader*|*AdOffer*|*AdUnit*"));
+    CHECK(!ZNAMatchGlob("GDTCORApplication", "GAD*|GAM*|*AdView*"));
+    CHECK(!ZNAMatchGlob("oad", "*AD"));
+    CHECK(!ZNAMatchGlob("GADAdLoader", "GADMobileAds|GDT*"));
+    CHECK(!ZNAMatchGlob("BU", "GAD*|"));
+    CHECK(ZNAMatchGlob("GAD", "GAD*"));
+    CHECK(ZNAMatchGlob("GAM", "GAM|GDT*"));
+    CHECK(ZNAMatchGlob("AXB", "A?B"));
+    CHECK(!ZNAMatchGlob("AB", "A?B"));
 
     printf(failures ? "%d glob checks failed\n" : "glob matcher ok\n", failures);
     return failures ? 1 : 0;

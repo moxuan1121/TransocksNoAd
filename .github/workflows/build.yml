@@ -1,4 +1,4 @@
-name: Build TransocksNoAd
+name: Build ZoomableNoAd
 
 on:
   workflow_dispatch:
@@ -16,20 +16,20 @@ jobs:
       - uses: actions/checkout@v5
       - name: Check glob matcher
         run: |
-          clang -Wall -Wextra -Werror -std=c11 -I Engine Tests/test_glob.c Engine/TNAGlob.c -o /tmp/transocksnoad-glob
-          /tmp/transocksnoad-glob
+          clang -Wall -Wextra -Werror -std=c11 -I Engine Tests/test_glob.c Engine/ZNAGlob.c -o /tmp/zoomablenoad-glob
+          /tmp/zoomablenoad-glob
       - name: Check ad hook patterns
         run: |
           clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter -I Engine -framework Foundation \
-            Tests/test_pattern.m Engine/TNAPattern.m Engine/TNAGlob.c -o /tmp/transocksnoad-pattern
-          /tmp/transocksnoad-pattern Tests/corpus_classes.txt
+            Tests/test_pattern.m Engine/ZNAPattern.m Engine/ZNAGlob.c -o /tmp/zoomablenoad-pattern
+          /tmp/zoomablenoad-pattern Tests/corpus_classes.txt
       - name: Review rule coverage
         run: python3 Tests/check_rules.py < Tests/corpus_classes.txt
       - name: Check block-as-IMP argument layout (host arm64 runtime)
         run: |
           clang -fobjc-arc -Wall -Wextra -Wno-unused-parameter -framework Foundation \
-            Tests/test_abi.m -o /tmp/transocksnoad-abi
-          /tmp/transocksnoad-abi
+            Tests/test_abi.m -o /tmp/zoomablenoad-abi
+          /tmp/zoomablenoad-abi
       - name: Install signing tools
         run: brew install ldid xz
       - name: Install pinned RootHide Theos and iOS 15.6 SDK
@@ -69,7 +69,7 @@ jobs:
                   pos += 60 + size + (size & 1)
               raise AssertionError('no control member in deb')
 
-          dylib = next(pathlib.Path('.theos/obj').rglob('TransocksNoAd.dylib'))
+          dylib = next(pathlib.Path('.theos/obj').rglob('ZoomableNoAd.dylib'))
           magic, cpu, subtype = struct.unpack_from('<III', dylib.read_bytes())
           assert magic == 0xfeedfacf and cpu == 0x100000c, 'expected thin ARM64 Mach-O'
           assert subtype == 0x0, f'expected plain arm64 to match the host app, got {subtype:#x}'
@@ -90,14 +90,14 @@ jobs:
           assert packages[0].name.endswith('_iphoneos-arm64e.deb'), packages[0].name
           print('built', packages[0], dylib)
           PY
-          find .theos/_ -type f | grep -E 'TransocksNoAd\.dylib|TransocksNoAd\.plist'
+          find .theos/_ -type f | grep -E 'ZoomableNoAd\.dylib|ZoomableNoAd\.plist'
       - uses: actions/upload-artifact@v4
         with:
-          name: TransocksNoAd-roothide-deb
+          name: ZoomableNoAd-roothide-deb
           path: packages/*.deb
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: TransocksNoAd-injectable-dylib
-          path: .theos/_/**/TransocksNoAd.dylib
+          name: ZoomableNoAd-injectable-dylib
+          path: .theos/_/**/ZoomableNoAd.dylib
           if-no-files-found: error
