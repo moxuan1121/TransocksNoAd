@@ -80,10 +80,9 @@ static void ZNAFlushLog(void) {
             if (!ZNALogWrittenPath) ZNALogWrittenPath = path;
             continue;
         }
-        if (error.code != NSFileWriteNoSuchFile && error.code != NSFileWritePathExists) {
-            // Documents / tmp 一类目录不存在是常态，只有真正被沙盒拒绝时才值得占一行日志。
-            ZNALog(@"log write refused %@ (code %ld)", path, (long)error.code);
-        }
+        // 目录不存在是常态（沙盒里 tmp 一套各有出入），但哪条路被沙盒挡了值得留一行 ——
+        // 只在还没写成过的时候报，避免每次落盘都往日志里塞同一批噪音。
+        if (!ZNALogWrittenPath) ZNALog(@"log write refused %@ (code %ld)", path, (long)error.code);
     }
     if (!ZNALogWrittenPath) ZNALogWrittenPath = @"(none)";
 }
@@ -619,7 +618,7 @@ static void ZNAInstallPresentGuard(void) {
         // 否则藏的就是 App 主界面了。
         if (![presented isKindOfClass:UIViewController.class]) return;
         UIWindow *window = [(UIViewController *)presented viewIfLoaded].window;
-        if (window && window.rootViewController == presented) ZNADefuse(window);
+        if (window && window.rootViewController == (UIViewController *)presented) ZNADefuse(window);
         ZNAFlushLog();
     };
     ZNAKeep(block);
